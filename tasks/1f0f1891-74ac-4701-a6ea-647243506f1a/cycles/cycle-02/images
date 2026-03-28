@@ -1,0 +1,45 @@
+# Wuhan Specialty Snacks Image Directory
+
+This directory contains placeholder image files for Wuhan specialty snacks. In a real implementation, you would replace these with actual high-quality images of the snacks.
+
+## Image Requirements
+
+For the static webpage to display properly, you should have the following images in this directory:
+
+1. **hot-dry-noodles.jpg** - Hot Dry Noodles (热干面)
+2. **doupi.jpg** - Doupi (豆皮)
+3. **mianwo.jpg** - Mianwo (面窝)
+4. **tangbao.jpg** - Tangbao (汤包)
+5. **fried-tofu.jpg** - Fried Tofu (炸豆腐)
+
+## Image Specifications
+
+- Format: JPEG or PNG
+- Size: 800x600 pixels recommended
+- Aspect ratio: 4:3 or 16:9
+- File naming: Use kebab-case (lowercase with hyphens)
+- Alt text: Should be descriptive for accessibility
+
+## Placeholder Images
+
+Since this is a static implementation, you can use placeholder images from services like:
+- https://via.placeholder.com/800x600?text=Hot+Dry+Noodles
+- https://via.placeholder.com/800x600?text=Doupi
+- https://via.placeholder.com/800x600?text=Mianwo
+- https://via.placeholder.com/800x600?text=Tangbao
+- https://via.placeholder.com/800x600?text=Fried+Tofu
+
+## Usage in HTML
+
+Images will be referenced in the HTML like this:
+```html
+<img src="images/hot-dry-noodles.jpg" alt="Hot Dry Noodles - Wuhan's most famous snack">
+```
+
+## Copyright Considerations
+
+For a production website, ensure you have proper rights to use all images, either through:
+- Original photography
+- Purchased stock photos
+- Creative Commons licensed images (with proper attribution)
+- Public domain images

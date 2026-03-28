@@ -1,0 +1,18 @@
+name: Multi-Agent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - nodejs=22
+  - pip
+  - fastapi>=0.115.0
+  - uvicorn>=0.30.0
+  - sqlalchemy>=2.0.32
+  - pydantic>=2.8.2
+  - httpx>=0.27.0
+  - pytest>=8.3.2
+  - pip:
+      - pydantic-settings>=2.3.4
+      - langchain-core>=0.3.0
+      - langgraph>=0.2.0
+      - psycopg[binary]>=3.2.1

@@ -1,0 +1,354 @@
+:root {
+  --bg: #f5efe4;
+  --bg-strong: #f1e4c8;
+  --panel: rgba(255, 250, 241, 0.78);
+  --panel-strong: rgba(255, 248, 232, 0.92);
+  --ink: #1f1a15;
+  --muted: #6b5c51;
+  --accent: #0d8f77;
+  --accent-strong: #0b6d5a;
+  --alert: #b4452d;
+  --line: rgba(31, 26, 21, 0.1);
+  --shadow: 0 24px 50px rgba(73, 53, 26, 0.12);
+  --radius-xl: 28px;
+  --radius-lg: 18px;
+  --radius-md: 12px;
+  --font-display: "Avenir Next", "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(13, 143, 119, 0.18), transparent 30%),
+    radial-gradient(circle at top right, rgba(180, 69, 45, 0.16), transparent 28%),
+    linear-gradient(180deg, #fbf6ed 0%, #f3e8d7 48%, #efe2ce 100%);
+  color: var(--ink);
+  font-family: var(--font-display);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+main {
+  width: min(1320px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 32px 0 56px;
+}
+
+.page-shell {
+  display: grid;
+  gap: 24px;
+}
+
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 28px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(145deg, rgba(255, 249, 238, 0.95), rgba(248, 238, 220, 0.8));
+  border: 1px solid rgba(13, 143, 119, 0.15);
+  box-shadow: var(--shadow);
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: auto -12% -32% auto;
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, rgba(13, 143, 119, 0.18), transparent 68%);
+}
+
+.hero h1,
+.section-title,
+.panel-title {
+  margin: 0;
+  letter-spacing: -0.04em;
+}
+
+.hero h1 {
+  font-size: clamp(2.25rem, 5vw, 4.3rem);
+  line-height: 0.92;
+  max-width: 880px;
+}
+
+.hero p {
+  max-width: 760px;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.hero-grid,
+.dashboard-grid,
+.overview-grid,
+.dual-grid {
+  display: grid;
+  gap: 20px;
+}
+
+.hero-grid {
+  grid-template-columns: 1.3fr 0.9fr;
+  align-items: start;
+}
+
+.dashboard-grid {
+  grid-template-columns: 1.25fr 0.75fr;
+}
+
+.overview-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dual-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.panel {
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  box-shadow: var(--shadow);
+}
+
+.panel-strong {
+  background: var(--panel-strong);
+}
+
+.panel-title {
+  font-size: 1.15rem;
+  margin-bottom: 12px;
+}
+
+.kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.76rem;
+  color: var(--accent-strong);
+  margin-bottom: 10px;
+}
+
+.metric-value {
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.metric-label,
+.subtle {
+  color: var(--muted);
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field label {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.field input,
+.field textarea,
+.field select {
+  width: 100%;
+  border: 1px solid rgba(31, 26, 21, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 13px 14px;
+  min-height: 48px;
+}
+
+.field textarea {
+  min-height: 128px;
+  resize: vertical;
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.button {
+  border: none;
+  border-radius: 999px;
+  padding: 13px 18px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  transition: transform 180ms ease, background 180ms ease;
+}
+
+.button:hover {
+  transform: translateY(-1px);
+  background: var(--accent-strong);
+}
+
+.button.secondary {
+  background: rgba(31, 26, 21, 0.08);
+  color: var(--ink);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.84rem;
+  background: rgba(13, 143, 119, 0.1);
+  color: var(--accent-strong);
+}
+
+.status-pill.failed,
+.status-pill.blocked {
+  background: rgba(180, 69, 45, 0.12);
+  color: var(--alert);
+}
+
+.graph-lane,
+.cycle-list,
+.event-list,
+.artifact-list,
+.project-list {
+  display: grid;
+  gap: 12px;
+}
+
+.graph-lane {
+  grid-template-columns: repeat(6, minmax(92px, 1fr));
+}
+
+.graph-node {
+  position: relative;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(13, 143, 119, 0.16);
+  min-height: 112px;
+}
+
+.graph-node::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -11px;
+  width: 22px;
+  height: 2px;
+  background: rgba(31, 26, 21, 0.16);
+}
+
+.graph-node:last-child::after {
+  display: none;
+}
+
+.graph-node.failed,
+.graph-node.blocked {
+  border-color: rgba(180, 69, 45, 0.3);
+}
+
+.graph-role {
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.graph-cycle {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.graph-meta {
+  margin-top: 14px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.cycle-card,
+.event-item,
+.artifact-item,
+.project-item {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(31, 26, 21, 0.08);
+}
+
+.event-item code,
+.artifact-preview {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.81rem;
+  line-height: 1.6;
+}
+
+.artifact-item summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.empty-state,
+.notice {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.run-title {
+  font-size: clamp(2rem, 4vw, 3.5rem);
+  line-height: 0.95;
+}
+
+@media (max-width: 1024px) {
+  .hero-grid,
+  .dashboard-grid,
+  .dual-grid,
+  .overview-grid,
+  .graph-lane {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-node::after {
+    display: none;
+  }
+}

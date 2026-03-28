@@ -1,0 +1,24 @@
+{
+  "must_have": [
+    "HTML file with semantic structure (header, main, footer)",
+    "CSS file linked to HTML for styling",
+    "Page title set to 'Cherry Blossoms Introduction'",
+    "Header with navigation links (e.g., Home, About, Contact)",
+    "Main content with at least two sections: one for introduction and one for facts",
+    "At least one cherry blossom image included with alt text",
+    "Footer with copyright information",
+    "Responsive design using CSS media queries",
+    "No JavaScript required",
+    "All files must be in the same directory"
+  ],
+  "should_have": [
+    "Use of cherry blossom colors (e.g., pink, white) in styling",
+    "Clean and modern layout with proper spacing",
+    "Accessible HTML elements (e.g., alt attributes, semantic tags)"
+  ],
+  "could_have": [
+    "Additional sections like history or cultural significance",
+    "More images or a gallery",
+    "Interactive hover effects on links"
+  ]
+}
