@@ -66,6 +66,19 @@ class ProviderRegistry:
             raise ValueError("LLM provider is not fully configured. Check LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL.")
         return config, OpenAICompatibleChatProvider(base_url=base_url, api_key=api_key, model=model)
 
+    def resolve_langchain_chat_model(self, session: Session, name: str):
+        config = self.get_config(session, name, ProviderKind.CHAT)
+        base_url = config.base_url or self._default_base_url(self.settings.llm_provider)
+        api_key = self.settings.llm_api_key
+        model = config.model or self.settings.llm_model
+        if not base_url or not api_key or not model:
+            raise ValueError("LLM provider is not fully configured. Check LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL.")
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as exc:  # pragma: no cover - exercised in environments without optional deps
+            raise RuntimeError("LangChain chat dependencies are not installed. Install langchain and langchain-openai.") from exc
+        return config, ChatOpenAI(model=model, api_key=api_key, base_url=base_url, temperature=0.1)
+
     def resolve_embedding_provider(self, session: Session, name: str):
         config = self.get_config(session, name, ProviderKind.EMBEDDING)
         base_url = config.base_url or self._default_base_url(self.settings.embedding_provider)
@@ -76,6 +89,21 @@ class ProviderRegistry:
                 "Embedding provider is not fully configured. Check EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL."
             )
         return config, OpenAICompatibleEmbeddingProvider(base_url=base_url, api_key=api_key, model=model)
+
+    def resolve_langchain_embedding_model(self, session: Session, name: str):
+        config = self.get_config(session, name, ProviderKind.EMBEDDING)
+        base_url = config.base_url or self._default_base_url(self.settings.embedding_provider)
+        api_key = self.settings.embedding_api_key
+        model = config.model or self.settings.embedding_model
+        if not base_url or not api_key or not model:
+            raise ValueError(
+                "Embedding provider is not fully configured. Check EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL."
+            )
+        try:
+            from langchain_openai import OpenAIEmbeddings
+        except ImportError as exc:  # pragma: no cover - exercised in environments without optional deps
+            raise RuntimeError("LangChain embedding dependencies are not installed. Install langchain and langchain-openai.") from exc
+        return config, OpenAIEmbeddings(model=model, api_key=api_key, base_url=base_url)
 
     def validate(self, config: ProviderConfig) -> tuple[bool, str]:
         base_url = config.base_url or self._default_base_url(config.provider)

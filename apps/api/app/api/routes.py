@@ -91,6 +91,12 @@ async def create_run(payload: RunRequest, session: Session = Depends(get_session
     return to_run_read(run)
 
 
+@router.get("/runs", response_model=list[RunRead])
+def list_runs(session: Session = Depends(get_session)) -> list[RunRead]:
+    records = session.scalars(select(RunRecord).order_by(RunRecord.created_at.desc())).all()
+    return [to_run_read(record) for record in records]
+
+
 @router.get("/runs/{run_id}", response_model=RunDetail)
 def get_run(run_id: str, session: Session = Depends(get_session)) -> RunDetail:
     container = get_container()
@@ -134,14 +140,17 @@ async def resume_run(run_id: str, session: Session = Depends(get_session)) -> Ru
     run = session.get(RunRecord, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
-    container.retry_manager.prepare_resume(session, run)
+    try:
+        container.retry_manager.prepare_resume(session, run)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await container.event_bus.publish(
         session,
         run_id=run.id,
         event_type=EventType.RUN_RESUMED,
         payload={"current_cycle": run.current_cycle},
     )
-    await container.runtime.start_run(run.id, resumed=True)
+    await container.runtime.start_run(run.id, resumed=True, force_restart=True)
     session.refresh(run)
     return to_run_read(run)
 

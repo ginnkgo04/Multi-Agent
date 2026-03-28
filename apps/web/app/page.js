@@ -5,19 +5,22 @@ import Link from 'next/link';
 import CreateProjectForm from './components/CreateProjectForm';
 import CreateRunForm from './components/CreateRunForm';
 import ProjectList from './components/ProjectList';
+import RunList from './components/RunList';
 import { request } from '@/lib/api';
 
 export default function HomePage() {
   const [projects, setProjects] = useState([]);
+  const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  async function loadProjects() {
+  async function loadDashboard() {
     setLoading(true);
     setError('');
     try {
-      const result = await request('/projects');
-      setProjects(result);
+      const [projectResult, runResult] = await Promise.all([request('/projects'), request('/runs')]);
+      setProjects(projectResult);
+      setRuns(runResult);
     } catch (loadError) {
       setError(loadError.message);
     } finally {
@@ -26,7 +29,7 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    loadProjects();
+    loadDashboard();
   }, []);
 
   return (
@@ -68,7 +71,7 @@ export default function HomePage() {
           </div>
           <div className="panel">
             <div className="panel-title">Create Project</div>
-            <CreateProjectForm onCreated={loadProjects} />
+            <CreateProjectForm onCreated={loadDashboard} />
           </div>
         </section>
 
@@ -79,12 +82,8 @@ export default function HomePage() {
             {error ? <div className="notice">{error}</div> : null}
           </div>
           <div className="panel">
-            <div className="panel-title">How To Inspect Real Outputs</div>
-            <div className="project-list">
-              <div className="project-item">1. Start a run and open the live dashboard.</div>
-              <div className="project-item">2. Watch artifacts appear by cycle as frontend, backend, delivery, and quality files.</div>
-              <div className="project-item">3. Open the task root path from the run overview to inspect the generated implementation workspace.</div>
-            </div>
+            <div className="panel-title">Recent Runs</div>
+            {loading ? <div className="empty-state">Loading runs...</div> : <RunList runs={runs.slice(0, 8)} />}
           </div>
         </section>
       </div>

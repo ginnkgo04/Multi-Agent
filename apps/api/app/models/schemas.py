@@ -55,6 +55,7 @@ class EventType(str, Enum):
     NODE_LOG = "node_log"
     NODE_COMPLETED = "node_completed"
     NODE_FAILED = "node_failed"
+    CHECKPOINT_SAVED = "checkpoint_saved"
     CYCLE_REGENERATED = "cycle_regenerated"
     RUN_PAUSED = "run_paused"
     RUN_RESUMED = "run_resumed"
@@ -205,16 +206,19 @@ class RunDetail(RunRead):
 
 class AgentTaskContext(BaseModel):
     role: Role
+    project_id: str
     run_id: str
     cycle_id: str
     cycle_index: int
     task_spec: dict[str, Any]
     shared_plan: dict[str, Any]
+    shared_plan_id: str | None = None
     upstream_artifacts: list[ArtifactManifest] = Field(default_factory=list)
     retrieved_context: list[dict[str, Any]] = Field(default_factory=list)
     provider_config: ProviderConfig
     memories: list[str] = Field(default_factory=list)
     original_requirement: str
+    template_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentTaskResult(BaseModel):
@@ -223,3 +227,28 @@ class AgentTaskResult(BaseModel):
     result_payload: dict[str, Any] = Field(default_factory=dict)
     confidence: float = 0.5
     handoff_notes: str = ""
+
+
+class PCResultSchema(BaseModel):
+    requirement_brief: str
+    acceptance_criteria: dict[str, Any] = Field(default_factory=dict)
+    work_breakdown: list[str] = Field(default_factory=list)
+    summary: str = ""
+    handoff_notes: str = ""
+    confidence: float = 0.72
+
+
+class CAResultSchema(BaseModel):
+    shared_plan: dict[str, Any] = Field(default_factory=dict)
+    interfaces: list[dict[str, Any]] = Field(default_factory=list)
+    architecture_decisions: list[str] = Field(default_factory=list)
+    summary: str = ""
+    handoff_notes: str = ""
+    confidence: float = 0.72
+
+
+class ToolAgentSubmitPayload(BaseModel):
+    summary: str
+    handoff_notes: str = ""
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.72

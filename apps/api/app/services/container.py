@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from app.agents.registry import build_default_registry
 from app.services.artifact_store import ArtifactStore
+from app.services.checkpoint_store import CheckpointStore
 from app.services.context_assembler import ContextAssembler
 from app.services.event_bus import EventBus
 from app.services.execution_runtime import ExecutionRuntime
@@ -21,6 +22,7 @@ class ServiceContainer:
         self.memory_service = MemoryService()
         self.rag_service = RagService()
         self.event_bus = EventBus()
+        self.checkpoint_store = CheckpointStore()
         self.graph_builder = WorkflowGraphBuilder()
         self.context_assembler = ContextAssembler(self.artifact_store, self.memory_service, self.rag_service)
         self.retry_manager = RetryRecoveryManager()
@@ -33,6 +35,8 @@ class ServiceContainer:
             event_bus=self.event_bus,
             memory_service=self.memory_service,
             retry_manager=self.retry_manager,
+            rag_service=self.rag_service,
+            checkpoint_store=self.checkpoint_store,
         )
 
 

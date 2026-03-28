@@ -35,7 +35,7 @@ class ContextAssembler:
         ).all()
         upstream_ids = [upstream.id for upstream in upstream_nodes]
         upstream_artifacts = self._artifact_manifests(session, upstream_ids)
-        shared_plan = self._extract_shared_plan(session, cycle.id)
+        shared_plan_id, shared_plan = self._extract_shared_plan(session, cycle.id)
         summaries = self.memory_service.summarize_cycles(session, run.id)
         memories = summaries + self.memory_service.list_recent(session, run.id)
         retrieved_context = await self.rag_service.retrieve(
@@ -47,29 +47,32 @@ class ContextAssembler:
         task_spec = dict(node.task_spec or {})
         return AgentTaskContext(
             role=Role(node.role),
+            project_id=run.project_id,
             run_id=run.id,
             cycle_id=cycle.id,
             cycle_index=cycle.cycle_index,
             task_spec=task_spec,
             shared_plan=shared_plan,
+            shared_plan_id=shared_plan_id,
             upstream_artifacts=upstream_artifacts,
             retrieved_context=retrieved_context,
             provider_config=chat_config,
             memories=memories,
             original_requirement=run.requirement,
+            template_context=run.template_context or {},
         )
 
-    def _extract_shared_plan(self, session: Session, cycle_id: str) -> dict:
+    def _extract_shared_plan(self, session: Session, cycle_id: str) -> tuple[str | None, dict]:
         nodes = session.scalars(
             select(NodeExecutionRecord).where(NodeExecutionRecord.cycle_id == cycle_id, NodeExecutionRecord.role.in_([Role.PC.value, Role.CA.value]))
         ).all()
         for node in reversed(nodes):
             payload = node.result_payload or {}
             if "shared_plan" in payload:
-                return payload["shared_plan"]
+                return node.id, payload["shared_plan"]
             if payload:
-                return payload
-        return {}
+                return node.id, payload
+        return None, {}
 
     def _artifact_manifests(self, session: Session, node_ids: list[str]) -> list[ArtifactManifest]:
         if not node_ids:

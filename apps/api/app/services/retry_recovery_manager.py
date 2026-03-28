@@ -43,6 +43,8 @@ class RetryRecoveryManager:
         session.commit()
 
     def prepare_resume(self, session: Session, run: RunRecord) -> CycleRecord:
+        if run.status not in {RunStatus.BLOCKED.value, RunStatus.RUNNING.value}:
+            raise ValueError("Only blocked or running runs can be restarted.")
         cycle = session.scalar(
             select(CycleRecord).where(CycleRecord.run_id == run.id, CycleRecord.cycle_index == run.current_cycle)
         )
@@ -50,9 +52,10 @@ class RetryRecoveryManager:
             raise ValueError("Run has no active cycle.")
         nodes = session.scalars(select(NodeExecutionRecord).where(NodeExecutionRecord.cycle_id == cycle.id)).all()
         for node in nodes:
-            if node.status in {NodeStatus.BLOCKED.value, NodeStatus.FAILED.value}:
+            if node.status in {NodeStatus.BLOCKED.value, NodeStatus.FAILED.value, NodeStatus.RUNNING.value}:
                 node.status = NodeStatus.PENDING.value
                 node.error_message = None
+                node.finished_at = None
         cycle.status = CycleStatus.RUNNING.value
         run.status = RunStatus.RUNNING.value
         session.commit()

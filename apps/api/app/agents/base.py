@@ -115,7 +115,6 @@ class WorkflowAgent:
                 "temperature": 0.15,
                 "max_tokens": 7000,
                 "timeout": 180,
-                "response_format": {"type": "json_object"},
             },
         )
         payload = self._parse_model_response(raw_response)
@@ -142,7 +141,6 @@ class WorkflowAgent:
                 "temperature": 0.1,
                 "max_tokens": 3500,
                 "timeout": 180,
-                "response_format": {"type": "json_object"},
             },
         )
         payload = self._parse_model_response(manifest_response)
@@ -258,7 +256,7 @@ class WorkflowAgent:
             preview_limit = 500
         upstream_sections = []
         for artifact in context.upstream_artifacts[:max_artifacts]:
-            preview = artifact.metadata.get("content_preview", "")[:preview_limit]
+            preview = self._normalize_prompt_text(artifact.metadata.get("content_preview", ""), limit=preview_limit)
             upstream_sections.append(
                 f"- {artifact.name}\n  summary: {artifact.summary}\n  preview:\n{preview}"
             )
@@ -266,34 +264,30 @@ class WorkflowAgent:
             upstream_sections.append(f"- ... {len(context.upstream_artifacts) - max_artifacts} more artifacts omitted for brevity")
         upstream = "\n".join(upstream_sections) or "- none"
         retrieved = "\n".join(
-            f"- {item.get('source', 'knowledge')} (score={item.get('score', 'n/a')}): {item.get('content', '')[:240]}"
+            f"- {self._normalize_prompt_text(item.get('source', 'knowledge'), limit=60)} "
+            f"(score={self._normalize_prompt_text(item.get('score', 'n/a'), limit=20)}): "
+            f"{self._normalize_prompt_text(item.get('content', ''), limit=240)}"
             for item in context.retrieved_context
         ) or "- none"
-        memories = "\n".join(f"- {item}" for item in context.memories) or "- none"
-        return dedent(
-            f"""
-            Requirement:
-            {context.original_requirement}
-
-            Shared plan:
-            {json.dumps(context.shared_plan, ensure_ascii=False, indent=2)}
-
-            Current cycle:
-            {context.cycle_index}
-
-            Current task spec:
-            {json.dumps(context.task_spec, ensure_ascii=False, indent=2)}
-
-            Upstream artifacts:
-            {upstream}
-
-            Retrieved context:
-            {retrieved}
-
-            Memories:
-            {memories}
-            """
-        ).strip()
+        memories = "\n".join(f"- {self._normalize_prompt_text(item, limit=240)}" for item in context.memories) or "- none"
+        sections = [
+            self._format_prompt_section("ROLE", self.profile.role.value),
+            self._format_prompt_section("REQUIREMENT", context.original_requirement),
+            self._format_prompt_section("SHARED_PLAN_JSON", json.dumps(context.shared_plan, ensure_ascii=False, indent=2)),
+            self._format_prompt_section("CURRENT_CYCLE", str(context.cycle_index)),
+            self._format_prompt_section("TASK_SPEC_JSON", json.dumps(context.task_spec, ensure_ascii=False, indent=2)),
+            self._format_prompt_section("UPSTREAM_ARTIFACTS", upstream),
+            self._format_prompt_section("RETRIEVED_CONTEXT", retrieved),
+            self._format_prompt_section("MEMORIES", memories),
+        ]
+        if context.template_context:
+            sections.append(
+                self._format_prompt_section(
+                    "TEMPLATE_CONTEXT_JSON",
+                    json.dumps(context.template_context, ensure_ascii=False, indent=2),
+                )
+            )
+        return "\n\n".join(sections)
 
     def _build_manifest_user_prompt(self, context: AgentTaskContext) -> str:
         return self._build_user_prompt(context) + "\n\nReturn the file manifest first. Do not inline file contents."
@@ -336,7 +330,7 @@ class WorkflowAgent:
             preview_limit = 240
         upstream_sections = []
         for upstream in context.upstream_artifacts[:max_artifacts]:
-            preview = upstream.metadata.get("content_preview", "")[:preview_limit]
+            preview = self._normalize_prompt_text(upstream.metadata.get("content_preview", ""), limit=preview_limit)
             upstream_sections.append(
                 f"- {upstream.name}\n  summary: {upstream.summary}\n  preview:\n{preview}"
             )
@@ -344,39 +338,22 @@ class WorkflowAgent:
             upstream_sections.append(f"- ... {len(context.upstream_artifacts) - max_artifacts} more artifacts omitted for brevity")
         upstream = "\n".join(upstream_sections) or "- none"
         retrieved = "\n".join(
-            f"- {item.get('source', 'knowledge')}: {item.get('content', '')[:180]}"
+            f"- {self._normalize_prompt_text(item.get('source', 'knowledge'), limit=60)}: "
+            f"{self._normalize_prompt_text(item.get('content', ''), limit=180)}"
             for item in context.retrieved_context
         ) or "- none"
-        return dedent(
-            f"""
-            Requirement:
-            {context.original_requirement}
-
-            Current cycle:
-            {context.cycle_index}
-
-            Shared plan:
-            {json.dumps(context.shared_plan, ensure_ascii=False, indent=2)}
-
-            Result payload:
-            {json.dumps(result_payload, ensure_ascii=False, indent=2)}
-
-            All required paths:
-            {json.dumps(required_paths, ensure_ascii=False, indent=2)}
-
-            Current target file:
-            {artifact["name"]}
-
-            File summary:
-            {artifact.get("summary", "")}
-
-            Upstream artifacts:
-            {upstream}
-
-            Retrieved context:
-            {retrieved}
-            """
-        ).strip()
+        sections = [
+            self._format_prompt_section("REQUIREMENT", context.original_requirement),
+            self._format_prompt_section("CURRENT_CYCLE", str(context.cycle_index)),
+            self._format_prompt_section("SHARED_PLAN_JSON", json.dumps(context.shared_plan, ensure_ascii=False, indent=2)),
+            self._format_prompt_section("RESULT_PAYLOAD_JSON", json.dumps(result_payload, ensure_ascii=False, indent=2)),
+            self._format_prompt_section("ALL_REQUIRED_PATHS_JSON", json.dumps(required_paths, ensure_ascii=False, indent=2)),
+            self._format_prompt_section("CURRENT_TARGET_FILE", artifact["name"]),
+            self._format_prompt_section("FILE_SUMMARY", artifact.get("summary", "")),
+            self._format_prompt_section("UPSTREAM_ARTIFACTS", upstream),
+            self._format_prompt_section("RETRIEVED_CONTEXT", retrieved),
+        ]
+        return "\n\n".join(sections)
 
     def _parse_model_response(self, raw_response: str) -> dict[str, Any]:
         try:
@@ -390,7 +367,7 @@ class WorkflowAgent:
     def _normalize_artifacts(self, context: AgentTaskContext, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for artifact in artifacts:
-            relative_path = str(artifact.get("path") or artifact.get("name") or "").strip().lstrip("/")
+            relative_path = self._normalize_relative_path(artifact.get("path") or artifact.get("name") or "")
             if not relative_path:
                 continue
             normalized.append(
@@ -417,6 +394,9 @@ class WorkflowAgent:
         for prefix in required_prefixes:
             if not any(name.startswith(prefix) for name in names):
                 raise ValueError(f"{self.profile.role.value} must produce at least one artifact under '{prefix}'.")
+        for artifact in artifacts:
+            if not artifact["name"] or ".." in artifact["name"].split("/"):
+                raise ValueError(f"{self.profile.role.value} produced an invalid artifact path: {artifact['name']}")
 
     @staticmethod
     def _normalize_qt_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -548,6 +528,12 @@ class WorkflowAgent:
 
     @staticmethod
     def _extract_json_object(text: str) -> str:
+        fenced = text.strip()
+        if fenced.startswith("```"):
+            lines = fenced.splitlines()
+            if len(lines) >= 3:
+                fenced = "\n".join(lines[1:-1]).strip()
+        text = fenced
         start = text.find("{")
         if start == -1:
             raise ValueError("No JSON object found in model response.")
@@ -610,6 +596,34 @@ class WorkflowAgent:
             if len(lines) >= 2:
                 return "\n".join(lines[1:-1]).strip()
         return stripped
+
+    @staticmethod
+    def _normalize_relative_path(path: Any) -> str:
+        text = WorkflowAgent._stringify_value(path).replace("\\", "/").strip().lstrip("/")
+        text = text.replace("\r", "").replace("\n", "")
+        while "//" in text:
+            text = text.replace("//", "/")
+        parts = [part for part in text.split("/") if part not in {"", "."}]
+        if any(part == ".." for part in parts):
+            return ""
+        return "/".join(parts)
+
+    @staticmethod
+    def _normalize_prompt_text(value: Any, *, limit: int) -> str:
+        text = WorkflowAgent._stringify_value(value).replace("\r\n", "\n").replace("\r", "\n")
+        text = text.replace("\t", "  ")
+        lines = [line.rstrip() for line in text.split("\n")]
+        collapsed = "\n".join(lines).strip()
+        if not collapsed:
+            return "none"
+        if len(collapsed) > limit:
+            return collapsed[: max(limit - 3, 1)].rstrip() + "..."
+        return collapsed
+
+    @staticmethod
+    def _format_prompt_section(name: str, content: Any) -> str:
+        normalized = WorkflowAgent._normalize_prompt_text(content, limit=12000)
+        return f"<{name}>\n{normalized}\n</{name}>"
 
     @staticmethod
     def _normalize_string_list(value: Any) -> list[str]:

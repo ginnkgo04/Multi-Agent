@@ -305,6 +305,32 @@ main {
   border: 1px solid rgba(31, 26, 21, 0.08);
 }
 
+.run-item-link {
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.run-item-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(13, 143, 119, 0.28);
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.run-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.run-requirement {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
 .event-item code,
 .artifact-preview {
   display: block;

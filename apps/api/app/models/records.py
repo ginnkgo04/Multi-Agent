@@ -115,6 +115,19 @@ class EventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class RunCheckpointRecord(Base):
+    __tablename__ = "run_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cycle_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    graph_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_completed_role: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    serialized_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class KnowledgeChunkRecord(Base):
     __tablename__ = "knowledge_chunks"
 
