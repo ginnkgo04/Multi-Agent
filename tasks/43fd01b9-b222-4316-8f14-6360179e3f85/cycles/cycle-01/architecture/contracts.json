@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Content Asset API",
+    "description": "Contract for providing text, images, and icons for the pink pig webpage, ensuring assets meet cute and high-quality standards.",
+    "type": "Data Interface"
+  },
+  {
+    "name": "Design System Contract",
+    "description": "Specifies color palette (pink/pastel), typography (playful fonts), and component styling (rounded elements) for consistent cute aesthetics.",
+    "type": "Design Interface"
+  },
+  {
+    "name": "Responsive Layout Contract",
+    "description": "Defines breakpoints and adaptive behaviors for mobile-friendly display across devices.",
+    "type": "Layout Interface"
+  }
+]
