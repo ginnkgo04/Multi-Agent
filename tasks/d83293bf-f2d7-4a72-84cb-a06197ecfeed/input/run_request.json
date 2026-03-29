@@ -1,0 +1,13 @@
+{
+  "run_id": "d83293bf-f2d7-4a72-84cb-a06197ecfeed",
+  "project_id": "1aed3f6f-8e5e-45f3-a6de-fc7a55404d2a",
+  "project_name": "Test2",
+  "requirement": "生成一个小熊的介绍网页",
+  "provider_name": "deepseek",
+  "embedding_provider_name": "bailian",
+  "manual_approval": false,
+  "template_context": {},
+  "template_context_origin": "empty",
+  "inherited_template_profile_id": null,
+  "max_cycles": 3
+}

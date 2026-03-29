@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.models.records import CycleRecord, MemoryRecord
+from app.models.records import ArtifactRecord, CycleRecord, MemoryRecord, MemorySummaryRecord, ProjectRecord, RunRecord, SharedPlanRecord
 
 
 class MemoryService:
@@ -29,17 +31,193 @@ class MemoryService:
         session.commit()
 
     def list_recent(self, session: Session, run_id: str, limit: int = 6) -> list[str]:
-        records = session.scalars(
-            select(MemoryRecord).where(MemoryRecord.run_id == run_id).order_by(desc(MemoryRecord.created_at)).limit(limit)
-        ).all()
+        records = self.list_recent_records(session, run_id, limit=limit)
         return [record.content for record in reversed(records)]
 
+    def list_recent_records(self, session: Session, run_id: str, limit: int = 6) -> list[MemoryRecord]:
+        return session.scalars(
+            select(MemoryRecord).where(MemoryRecord.run_id == run_id).order_by(desc(MemoryRecord.created_at)).limit(limit)
+        ).all()
+
     def summarize_cycles(self, session: Session, run_id: str) -> list[str]:
-        cycles = session.scalars(select(CycleRecord).where(CycleRecord.run_id == run_id).order_by(CycleRecord.cycle_index)).all()
-        summaries = []
-        for cycle in cycles:
-            report = cycle.quality_report or {}
-            if report:
-                status = report.get("status", "UNKNOWN")
-                summaries.append(f"Cycle {cycle.cycle_index}: QT={status} remediation={report.get('remediation_requirement', 'none')}")
-        return summaries
+        records = self.list_summaries(session, run_id, summary_type="cycle_summary")
+        return [record.content for record in records]
+
+    def create_summary(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        project_id: str | None,
+        cycle_id: str,
+        summary_type: str,
+        content: str,
+        metadata: dict | None = None,
+    ) -> MemorySummaryRecord:
+        record = MemorySummaryRecord(
+            run_id=run_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            summary_type=summary_type,
+            content=content,
+            summary_metadata=metadata or {},
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+
+    def list_summaries(self, session: Session, run_id: str, summary_type: str | None = None) -> list[MemorySummaryRecord]:
+        query = select(MemorySummaryRecord).where(MemorySummaryRecord.run_id == run_id).order_by(MemorySummaryRecord.created_at)
+        if summary_type:
+            query = query.where(MemorySummaryRecord.summary_type == summary_type)
+        return session.scalars(query).all()
+
+    def list_project_template_profiles(self, session: Session, project_id: str) -> list[MemorySummaryRecord]:
+        return session.scalars(
+            select(MemorySummaryRecord)
+            .where(
+                MemorySummaryRecord.project_id == project_id,
+                MemorySummaryRecord.summary_type == "project_template_profile",
+            )
+            .order_by(MemorySummaryRecord.created_at.desc())
+        ).all()
+
+    def get_current_project_template_profile(self, session: Session, project_id: str) -> MemorySummaryRecord | None:
+        for record in self.list_project_template_profiles(session, project_id):
+            if (record.summary_metadata or {}).get("is_current"):
+                return record
+        return None
+
+    def resolve_effective_template_context(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        requested_template_context: dict | None,
+    ) -> tuple[dict, str, MemorySummaryRecord | None]:
+        normalized = dict(requested_template_context or {})
+        if normalized:
+            return normalized, "explicit", None
+        profile = self.get_current_project_template_profile(session, project_id)
+        if profile:
+            inherited = profile.summary_metadata.get("template_context")
+            if isinstance(inherited, dict) and inherited:
+                return dict(inherited), "project_profile", profile
+        return {}, "empty", profile
+
+    def build_cycle_summary(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        cycle_id: str,
+        cycle_index: int,
+        qt_payload: dict,
+    ) -> tuple[str, dict]:
+        cycle_memories = session.scalars(
+            select(MemoryRecord).where(MemoryRecord.run_id == run_id, MemoryRecord.cycle_id == cycle_id).order_by(MemoryRecord.created_at)
+        ).all()
+        status = str(qt_payload.get("status", "UNKNOWN")).upper()
+        remediation = str(qt_payload.get("remediation_requirement", "none"))
+        summary_lines = [
+            f"Cycle {cycle_index} status: {status}",
+            f"Remediation: {remediation}",
+        ]
+        for record in cycle_memories[-6:]:
+            role = str((record.memory_metadata or {}).get("role", record.memory_type)).upper()
+            summary_lines.append(f"{role}: {record.content}")
+        metadata = {
+            "cycle_index": cycle_index,
+            "status": status,
+            "memory_count": len(cycle_memories),
+        }
+        return "\n".join(summary_lines), metadata
+
+    def build_project_template_profile(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        run: RunRecord,
+        cycle_id: str,
+    ) -> tuple[str, dict]:
+        project = session.get(ProjectRecord, project_id)
+        shared_plan = session.scalar(
+            select(SharedPlanRecord).where(SharedPlanRecord.run_id == run.id, SharedPlanRecord.is_current == True).order_by(desc(SharedPlanRecord.created_at))  # noqa: E712
+        )
+        artifacts = session.scalars(
+            select(ArtifactRecord).where(ArtifactRecord.run_id == run.id).order_by(ArtifactRecord.created_at.desc())
+        ).all()
+        artifact_roots = sorted({record.name.split("/", 1)[0] for record in artifacts if record.name})
+        template_context = dict(run.template_context or {})
+        template_context["project_template"] = project.template if project else template_context.get("project_template", "default-template")
+        template_context["preferred_artifact_roots"] = artifact_roots
+        if shared_plan and shared_plan.summary:
+            template_context["shared_plan_summary"] = shared_plan.summary
+        if shared_plan:
+            plan_payload = shared_plan.plan_payload or {}
+            if isinstance(plan_payload.get("interfaces"), list):
+                template_context["interface_highlights"] = plan_payload["interfaces"][:4]
+            if isinstance(plan_payload.get("architecture_decisions"), list):
+                template_context["architecture_decisions"] = plan_payload["architecture_decisions"][:4]
+        content_lines = [
+            f"Project template: {template_context['project_template']}",
+            f"Source run: {run.id}",
+            f"Stable artifact roots: {', '.join(artifact_roots) if artifact_roots else 'none'}",
+        ]
+        if shared_plan and shared_plan.summary:
+            content_lines.append(f"Shared plan summary: {shared_plan.summary}")
+        if run.template_context:
+            content_lines.append("Base template context:")
+            content_lines.append(json.dumps(run.template_context, ensure_ascii=False, indent=2))
+        metadata = {
+            "source_run_id": run.id,
+            "source_cycle_id": cycle_id,
+            "template_context": template_context,
+        }
+        return "\n".join(content_lines), metadata
+
+    def upsert_project_template_profile(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        run: RunRecord,
+        cycle_id: str,
+    ) -> MemorySummaryRecord:
+        existing_profiles = self.list_project_template_profiles(session, project_id)
+        next_version = len(existing_profiles) + 1
+        for record in existing_profiles:
+            metadata = dict(record.summary_metadata or {})
+            if metadata.get("is_current"):
+                metadata["is_current"] = False
+                record.summary_metadata = metadata
+        content, metadata = self.build_project_template_profile(session, project_id=project_id, run=run, cycle_id=cycle_id)
+        metadata = {
+            **metadata,
+            "version_index": next_version,
+            "is_current": True,
+        }
+        session.commit()
+        return self.create_summary(
+            session,
+            run_id=run.id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            summary_type="project_template_profile",
+            content=content,
+            metadata=metadata,
+        )
+
+    def backfill_project_ids(self, session: Session) -> None:
+        records = session.scalars(select(MemorySummaryRecord).where(MemorySummaryRecord.project_id.is_(None))).all()
+        changed = False
+        for record in records:
+            run = session.get(RunRecord, record.run_id)
+            if run is None:
+                continue
+            record.project_id = run.project_id
+            changed = True
+        if changed:
+            session.commit()

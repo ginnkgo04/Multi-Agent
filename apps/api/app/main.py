@@ -28,6 +28,8 @@ app.include_router(router, prefix=settings.api_prefix)
 def on_startup() -> None:
     init_db()
     with SessionLocal() as session:
+        container.memory_service.backfill_project_ids(session)
+        container.context_document_service.bootstrap(session)
         container.provider_registry.seed_defaults(session)
         existing_project = session.scalar(select(ProjectRecord).limit(1))
         if existing_project is None:

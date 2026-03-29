@@ -45,35 +45,14 @@ class LangChainLCELAgent:
         context: AgentTaskContext,
         *,
         chat_model,
+        fallback_provider=None,
         session: Session,
         embedding_model,
         rag_service,
         tool_logger: ToolLogger | None = None,
     ) -> AgentTaskResult:
-        del session, embedding_model, rag_service, tool_logger
-        try:
-            from langchain_core.prompts import ChatPromptTemplate
-            from langchain_core.runnables import RunnableLambda
-        except ImportError as exc:  # pragma: no cover - depends on optional packages
-            raise RuntimeError("LangChain core is not installed. Install langchain/langchain-core to run LCEL agents.") from exc
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", self._system_prompt()),
-                ("human", "{context_block}"),
-            ]
-        )
-        chain = (
-            RunnableLambda(
-                lambda _: {
-                    "context_block": self._human_prompt(context),
-                }
-            )
-            | prompt
-            | chat_model
-        )
-        response = await chain.ainvoke({})
-        raw_text = getattr(response, "content", response)
+        del fallback_provider, session, embedding_model, rag_service, tool_logger
+        raw_text = await self._invoke_model(context, chat_model)
         payload = self.legacy._parse_model_response(str(raw_text))
         summary = payload.get("summary") or f"{self.role.value} produced structured planning output."
         handoff_notes = payload.get("handoff_notes") or f"Proceed to the next role after reviewing the {self.role.value} outputs."
@@ -89,6 +68,46 @@ class LangChainLCELAgent:
             confidence=confidence,
             handoff_notes=handoff_notes,
         )
+
+    async def _invoke_model(self, context: AgentTaskContext, chat_model) -> Any:
+        prompt_text = self._human_prompt(context)
+        if hasattr(chat_model, "generate"):
+            return await chat_model.generate(
+                system_prompt=self._system_prompt(),
+                user_prompt=prompt_text,
+                metadata={
+                    "role": self.role.value,
+                    "cycle_index": context.cycle_index,
+                    "requirement": context.original_requirement,
+                    "temperature": 0.1,
+                    "max_tokens": 3500,
+                    "timeout": 180,
+                },
+            )
+
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.runnables import RunnableLambda
+        except ImportError as exc:  # pragma: no cover - depends on optional packages
+            raise RuntimeError("LangChain core is not installed. Install langchain/langchain-core to run LCEL agents.") from exc
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self._system_prompt()),
+                ("human", "{context_block}"),
+            ]
+        )
+        chain = (
+            RunnableLambda(
+                lambda _: {
+                    "context_block": prompt_text,
+                }
+            )
+            | prompt
+            | chat_model
+        )
+        response = await chain.ainvoke({})
+        return getattr(response, "content", response)
 
     def _system_prompt(self) -> str:
         spec = ROLE_SPECS[self.role]
@@ -220,6 +239,7 @@ class LangChainToolAgent:
         context: AgentTaskContext,
         *,
         chat_model,
+        fallback_provider=None,
         session: Session,
         embedding_model,
         rag_service,
@@ -247,8 +267,9 @@ class LangChainToolAgent:
         @tool
         async def get_shared_plan() -> str:
             """Return the current shared plan as JSON text."""
-            await log_tool("get_shared_plan", "ok", {"shared_plan_id": context.shared_plan_id})
-            return _json_blob(context.shared_plan)
+            shared_plan_id, plan = rag_service.get_shared_plan(session, context.run_id)
+            await log_tool("get_shared_plan", "ok", {"shared_plan_id": shared_plan_id or context.shared_plan_id})
+            return _json_blob(plan or context.shared_plan)
 
         @tool
         async def list_upstream_artifacts() -> str:
@@ -266,16 +287,29 @@ class LangChainToolAgent:
             return _json_blob(previews)
 
         @tool
-        async def retrieve_context(query: str, top_k: int = 4) -> str:
+        async def retrieve_context(query: str, top_k: int = 4, source_types: list[str] | None = None) -> str:
             """Retrieve extra project context using the platform RAG service."""
             items = await rag_service.retrieve(
                 session,
                 context.project_id,
                 query,
                 embedding_model,
+                run_id=context.run_id,
                 top_k=top_k,
+                source_types=source_types,
             )
-            await log_tool("retrieve_context", "ok", {"query": query, "count": len(items), "top_k": top_k})
+            await log_tool(
+                "retrieve_context",
+                "ok",
+                {"query": query, "count": len(items), "top_k": top_k, "source_types": source_types or []},
+            )
+            return _json_blob(items)
+
+        @tool
+        async def get_context_sources() -> str:
+            """Return the ordered context sources already assembled for the current node."""
+            items = [source.model_dump(mode="json") for source in context.context_sources]
+            await log_tool("get_context_sources", "ok", {"count": len(items)})
             return _json_blob(items)
 
         @tool
@@ -320,24 +354,39 @@ class LangChainToolAgent:
             get_shared_plan,
             list_upstream_artifacts,
             retrieve_context,
+            get_context_sources,
             emit_artifact,
             submit_result,
         ]
-        await self._run_tool_agent(chat_model, tools, context)
+        try:
+            await self._run_tool_agent(chat_model, tools, context)
 
-        if not buffer.submitted:
-            raise ValueError(f"{self.role.value} must call submit_result before finishing.")
+            if not buffer.submitted:
+                raise ValueError(f"{self.role.value} must call submit_result before finishing.")
 
-        self.legacy._validate_artifacts(buffer.artifacts)
-        _assert_required_paths(self.role, buffer.artifacts)
-        result_payload = self.legacy._normalize_result_payload(buffer.result_payload)
-        return AgentTaskResult(
-            summary=buffer.summary,
-            artifact_list=buffer.artifacts,
-            result_payload=result_payload,
-            confidence=buffer.confidence,
-            handoff_notes=buffer.handoff_notes,
-        )
+            self.legacy._validate_artifacts(buffer.artifacts)
+            _assert_required_paths(self.role, buffer.artifacts)
+            result_payload = self.legacy._normalize_result_payload(buffer.result_payload)
+            return AgentTaskResult(
+                summary=buffer.summary,
+                artifact_list=buffer.artifacts,
+                result_payload=result_payload,
+                confidence=buffer.confidence,
+                handoff_notes=buffer.handoff_notes,
+            )
+        except Exception as exc:
+            if fallback_provider is None:
+                raise
+            await log_tool(
+                "legacy_fallback",
+                "ok",
+                {
+                    "reason": str(exc),
+                    "buffered_artifact_count": len(buffer.artifacts),
+                    "submitted": buffer.submitted,
+                },
+            )
+            return await self.legacy.execute(context, fallback_provider)
 
     async def _run_tool_agent(self, chat_model, tools: list[Any], context: AgentTaskContext) -> None:
         prompt_text = self._human_prompt(context)

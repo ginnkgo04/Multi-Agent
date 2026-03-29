@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     default_chat_provider: str = "primary-llm"
     default_embedding_provider: str = "primary-embedding"
     retriever_top_k: int = 4
+    context_char_budget: int = 8000
     llm_provider: str = "openai-compatible"
     llm_model: str = ""
     llm_api_key: str = ""

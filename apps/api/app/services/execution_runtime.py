@@ -27,7 +27,8 @@ class ExecutionRuntime:
         memory_service,
         retry_manager,
         rag_service,
-        checkpoint_store,
+        context_document_service=None,
+        checkpoint_store=None,
     ) -> None:
         self.registry = registry
         self.provider_registry = provider_registry
@@ -38,6 +39,7 @@ class ExecutionRuntime:
         self.memory_service = memory_service
         self.retry_manager = retry_manager
         self.rag_service = rag_service
+        self.context_document_service = context_document_service or rag_service
         self.checkpoint_store = checkpoint_store
         self._tasks: dict[str, asyncio.Task] = {}
         self._graphs: dict[str, Any] = {}
@@ -131,6 +133,7 @@ class ExecutionRuntime:
             state["embedding_provider_name"] = run.embedding_provider_name
             state["manual_approval"] = run.manual_approval
             state["template_context"] = run.template_context or {}
+            state["template_context_origin"] = run.template_context_origin
             return graph_kind, state
         return graph_kind, {
             "run_id": run.id,
@@ -142,6 +145,7 @@ class ExecutionRuntime:
             "shared_plan_id": None,
             "manual_approval": run.manual_approval,
             "template_context": run.template_context or {},
+            "template_context_origin": run.template_context_origin,
             "node_outputs": {},
             "artifact_refs": {},
             "last_completed_role": None,
@@ -209,8 +213,33 @@ class ExecutionRuntime:
                     payload={"role": node.role, "graph_kind": graph_kind, "retry_count": node.retry_count},
                 )
                 try:
-                    chat_config, chat_model = self.provider_registry.resolve_langchain_chat_model(session, run.provider_name)
-                    _, embedding_model = self.provider_registry.resolve_langchain_embedding_model(session, run.embedding_provider_name)
+                    fallback_provider = None
+                    if role in {Role.PC, Role.CA}:
+                        chat_config, chat_model = self.provider_registry.resolve_chat_provider(session, run.provider_name)
+                    else:
+                        chat_config, chat_model = self.provider_registry.resolve_langchain_chat_model(session, run.provider_name)
+                        _, fallback_provider = self.provider_registry.resolve_chat_provider(session, run.provider_name)
+                    _, embedding_model = self.provider_registry.resolve_embedding_provider(session, run.embedding_provider_name)
+                    await self.event_bus.publish(
+                        session,
+                        run_id=run.id,
+                        event_type=EventType.NODE_LOG,
+                        cycle_id=cycle.id,
+                        node_id=node.id,
+                        payload={
+                            "role": node.role,
+                            "tool_name": "provider_resolution",
+                            "status": "ok",
+                            "provider_name": run.provider_name,
+                            "provider_kind": "native" if role in {Role.PC, Role.CA} else "langchain",
+                            "chat_model_class": type(chat_model).__name__,
+                            "chat_model_module": type(chat_model).__module__,
+                            "fallback_provider_class": type(fallback_provider).__name__ if fallback_provider is not None else None,
+                            "embedding_provider_name": run.embedding_provider_name,
+                            "embedding_model_class": type(embedding_model).__name__,
+                            "embedding_model_module": type(embedding_model).__module__,
+                        },
+                    )
                     context = await self.context_assembler.build_context(
                         session,
                         run=run,
@@ -218,6 +247,18 @@ class ExecutionRuntime:
                         node=node,
                         chat_config=chat_config,
                         embedding_provider=embedding_model,
+                    )
+                    await self.event_bus.publish(
+                        session,
+                        run_id=run.id,
+                        event_type=EventType.CONTEXT_ASSEMBLED,
+                        cycle_id=cycle.id,
+                        node_id=node.id,
+                        payload={
+                            "role": node.role,
+                            "context_sources": [source.model_dump(mode="json") for source in context.context_sources],
+                            "metadata": context.context_metadata,
+                        },
                     )
 
                     async def tool_logger(tool_name: str, status: str, payload: dict[str, Any] | None = None) -> None:
@@ -239,6 +280,7 @@ class ExecutionRuntime:
                     result = await agent.execute(
                         context,
                         chat_model=chat_model,
+                        fallback_provider=fallback_provider,
                         session=session,
                         embedding_model=embedding_model,
                         rag_service=self.rag_service,
@@ -253,6 +295,38 @@ class ExecutionRuntime:
                         role=node.role,
                         artifacts=result.artifact_list,
                     )
+                    indexed_artifacts = await self.context_document_service.index_artifacts(
+                        session,
+                        project_id=run.project_id,
+                        artifacts=artifacts,
+                        embedding_provider=embedding_model,
+                    )
+                    if indexed_artifacts:
+                        await self.event_bus.publish(
+                            session,
+                            run_id=run.id,
+                            event_type=EventType.CONTEXT_INDEXED,
+                            cycle_id=cycle.id,
+                            node_id=node.id,
+                            payload={
+                                "role": node.role,
+                                "source_type": "artifact",
+                                "chunk_count": indexed_artifacts,
+                            },
+                        )
+                    shared_plan_id = await self._sync_shared_plan(
+                        session=session,
+                        run=run,
+                        cycle=cycle,
+                        node=node,
+                        result_payload=result.result_payload,
+                        summary=result.summary,
+                        embedding_model=embedding_model,
+                    )
+                    node.context_snapshot = {
+                        "context_sources": [source.model_dump(mode="json") for source in context.context_sources],
+                        "metadata": context.context_metadata,
+                    }
                     self.retry_manager.mark_node_completed(session, node, result.result_payload, result.handoff_notes)
                     self.memory_service.add_memory(
                         session,
@@ -261,6 +335,14 @@ class ExecutionRuntime:
                         memory_type=f"{node.role.lower()}_summary",
                         content=result.summary.splitlines()[0],
                         metadata={"node_id": node.id, "role": node.role},
+                    )
+                    await self._sync_memory_summaries(
+                        session=session,
+                        run=run,
+                        cycle=cycle,
+                        node=node,
+                        result_payload=result.result_payload,
+                        embedding_model=embedding_model,
                     )
                     await self.event_bus.publish(
                         session,
@@ -279,6 +361,7 @@ class ExecutionRuntime:
                         role=role,
                         cycle=cycle,
                         node=node,
+                        shared_plan_id=shared_plan_id,
                         result_payload=result.result_payload,
                         artifacts=artifacts,
                     )
@@ -383,6 +466,7 @@ class ExecutionRuntime:
         role: Role,
         cycle: CycleRecord,
         node: NodeExecutionRecord,
+        shared_plan_id: str | None,
         result_payload: dict[str, Any],
         artifacts,
     ) -> WorkflowState:
@@ -392,8 +476,8 @@ class ExecutionRuntime:
             "last_completed_role": role.value,
             "retry_counts": {role.value: node.retry_count},
         }
-        if role is Role.CA and result_payload.get("shared_plan"):
-            state_update["shared_plan_id"] = node.id
+        if shared_plan_id:
+            state_update["shared_plan_id"] = shared_plan_id
 
         if role is not Role.QT:
             return state_update
@@ -428,6 +512,11 @@ class ExecutionRuntime:
             "retry_counts": {node.role: node.retry_count},
             "last_completed_role": node.role,
         }
+        if node.role in {Role.PC.value, Role.CA.value}:
+            with SessionLocal() as session:
+                shared_plan = self.context_document_service.get_current_shared_plan(session, state["run_id"])
+                if shared_plan is not None:
+                    state_update["shared_plan_id"] = shared_plan.id
         if node.role == Role.QT.value:
             state_update["next_action"] = "continue" if (node.result_payload or {}).get("status") == "FAIL" else "complete"
         return state_update
@@ -436,6 +525,9 @@ class ExecutionRuntime:
         merged: WorkflowState = dict(base_state)
         for key, value in state_update.items():
             if key in {"node_outputs", "artifact_refs", "retry_counts"}:
+                if value == {}:
+                    merged[key] = {}
+                    continue
                 merged[key] = {
                     **dict(merged.get(key, {})),
                     **dict(value or {}),
@@ -463,6 +555,136 @@ class ExecutionRuntime:
                 "checkpoint_id": record.id,
                 "graph_kind": graph_kind,
                 "last_completed_role": state.get("last_completed_role"),
+            },
+        )
+
+    async def _sync_shared_plan(
+        self,
+        *,
+        session,
+        run: RunRecord,
+        cycle: CycleRecord,
+        node: NodeExecutionRecord,
+        result_payload: dict[str, Any],
+        summary: str,
+        embedding_model,
+    ) -> str | None:
+        plan_payload: dict[str, Any] | None = None
+        if node.role == Role.PC.value:
+            plan_payload = {
+                "requirement_brief": result_payload.get("requirement_brief", ""),
+                "acceptance_criteria": result_payload.get("acceptance_criteria", {}),
+                "work_breakdown": result_payload.get("work_breakdown", []),
+                "template_context": run.template_context or {},
+            }
+        elif node.role == Role.CA.value and result_payload.get("shared_plan"):
+            plan_payload = dict(result_payload.get("shared_plan") or {})
+            plan_payload.setdefault("interfaces", result_payload.get("interfaces", []))
+            plan_payload.setdefault("architecture_decisions", result_payload.get("architecture_decisions", []))
+            plan_payload.setdefault("template_context", run.template_context or {})
+        if not plan_payload:
+            return None
+        shared_plan = self.context_document_service.create_shared_plan(
+            session,
+            run_id=run.id,
+            cycle_id=cycle.id,
+            produced_by_role=node.role,
+            plan_payload=plan_payload,
+            summary=summary,
+        )
+        indexed = await self.context_document_service.index_shared_plan(
+            session,
+            project_id=run.project_id,
+            record=shared_plan,
+            embedding_provider=embedding_model,
+        )
+        await self.event_bus.publish(
+            session,
+            run_id=run.id,
+            event_type=EventType.CONTEXT_INDEXED,
+            cycle_id=cycle.id,
+            node_id=node.id,
+            payload={
+                "role": node.role,
+                "source_type": "shared_plan",
+                "source_id": shared_plan.id,
+                "chunk_count": indexed,
+            },
+        )
+        return shared_plan.id
+
+    async def _sync_memory_summaries(
+        self,
+        *,
+        session,
+        run: RunRecord,
+        cycle: CycleRecord,
+        node: NodeExecutionRecord,
+        result_payload: dict[str, Any],
+        embedding_model,
+    ) -> None:
+        if node.role != Role.QT.value:
+            return
+        summary_content, metadata = self.memory_service.build_cycle_summary(
+            session,
+            run_id=run.id,
+            cycle_id=cycle.id,
+            cycle_index=cycle.cycle_index,
+            qt_payload=result_payload,
+        )
+        cycle_summary = self.memory_service.create_summary(
+            session,
+            run_id=run.id,
+            project_id=run.project_id,
+            cycle_id=cycle.id,
+            summary_type="cycle_summary",
+            content=summary_content,
+            metadata=metadata,
+        )
+        indexed_cycle = await self.context_document_service.index_memory_summary(
+            session,
+            record=cycle_summary,
+            embedding_provider=embedding_model,
+        )
+        await self.event_bus.publish(
+            session,
+            run_id=run.id,
+            event_type=EventType.CONTEXT_INDEXED,
+            cycle_id=cycle.id,
+            node_id=node.id,
+            payload={
+                "role": node.role,
+                "source_type": "memory",
+                "summary_type": "cycle_summary",
+                "source_id": cycle_summary.id,
+                "chunk_count": indexed_cycle,
+            },
+        )
+        if str(result_payload.get("status", "FAIL")).upper() != "PASS":
+            return
+        profile = self.memory_service.upsert_project_template_profile(
+            session,
+            project_id=run.project_id,
+            run=run,
+            cycle_id=cycle.id,
+        )
+        indexed_profile = await self.context_document_service.index_memory_summary(
+            session,
+            record=profile,
+            embedding_provider=embedding_model,
+        )
+        await self.event_bus.publish(
+            session,
+            run_id=run.id,
+            event_type=EventType.CONTEXT_INDEXED,
+            cycle_id=cycle.id,
+            node_id=node.id,
+            payload={
+                "role": node.role,
+                "source_type": "memory",
+                "summary_type": "project_template_profile",
+                "source_id": profile.id,
+                "chunk_count": indexed_profile,
             },
         )
 

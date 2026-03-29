@@ -4,16 +4,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models.records import CycleRecord, NodeExecutionRecord, ProjectRecord, RunRecord
+from app.models.records import CycleRecord, MemorySummaryRecord, NodeExecutionRecord, ProjectRecord, RunRecord, SharedPlanRecord
 from app.models.schemas import (
     ArtifactManifest,
     CycleStatus,
     CycleSummary,
+    MemorySummaryRead,
+    NodeContextSourcesRead,
     QualityReport,
+    ProjectTemplateProfileRead,
     ProjectRead,
     RunDetail,
     RunRead,
     RunStatus,
+    SharedPlanRead,
+    SharedPlanVersionRead,
     WorkflowNodeView,
     NodeStatus,
     Role,
@@ -81,6 +86,58 @@ def to_run_detail(session: Session, run: RunRecord, artifacts: list[ArtifactMani
         **to_run_read(run).model_dump(),
         cycles=[to_cycle_summary(session, cycle) for cycle in cycles],
         latest_artifacts=artifacts[:12],
+    )
+
+
+def to_shared_plan_read(run_id: str, records: list[SharedPlanRecord]) -> SharedPlanRead:
+    latest = next((record for record in reversed(records) if record.is_current), records[-1] if records else None)
+    return SharedPlanRead(
+        run_id=run_id,
+        latest_plan_id=latest.id if latest else None,
+        latest_plan=dict(latest.plan_payload or {}) if latest else {},
+        versions=[
+            SharedPlanVersionRead(
+                id=record.id,
+                cycle_id=record.cycle_id,
+                version_index=record.version_index,
+                produced_by_role=record.produced_by_role,
+                summary=record.summary,
+                is_current=record.is_current,
+                created_at=record.created_at,
+            )
+            for record in records
+        ],
+    )
+
+
+def to_memory_summary_read(record: MemorySummaryRecord) -> MemorySummaryRead:
+    return MemorySummaryRead(
+        id=record.id,
+        run_id=record.run_id,
+        project_id=record.project_id,
+        cycle_id=record.cycle_id,
+        summary_type=record.summary_type,
+        content=record.content,
+        metadata=record.summary_metadata or {},
+        created_at=record.created_at,
+    )
+
+
+def to_node_context_sources_read(run_id: str, node_id: str, snapshot: dict) -> NodeContextSourcesRead:
+    return NodeContextSourcesRead(
+        run_id=run_id,
+        node_id=node_id,
+        context_sources=snapshot.get("context_sources", []),
+        metadata=snapshot.get("metadata", {}),
+    )
+
+
+def to_project_template_profile_read(project_id: str, records: list[MemorySummaryRecord]) -> ProjectTemplateProfileRead:
+    latest = next((record for record in records if (record.summary_metadata or {}).get("is_current")), records[0] if records else None)
+    return ProjectTemplateProfileRead(
+        project_id=project_id,
+        latest=to_memory_summary_read(latest) if latest else None,
+        versions=[to_memory_summary_read(record) for record in records],
     )
 
 

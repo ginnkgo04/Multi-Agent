@@ -51,6 +51,7 @@ class RunRecord(Base):
     embedding_provider_name: Mapped[str] = mapped_column(String(255), nullable=False)
     manual_approval: Mapped[bool] = mapped_column(default=False)
     template_context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    template_context_origin: Mapped[str] = mapped_column(String(32), default="explicit")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -82,6 +83,7 @@ class NodeExecutionRecord(Base):
     result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     handoff_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -128,6 +130,38 @@ class RunCheckpointRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ContextDocumentRecord(Base):
+    __tablename__ = "context_documents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, default="")
+    embedding: Mapped[list[float]] = mapped_column(JSON, default=list)
+    document_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SharedPlanRecord(Base):
+    __tablename__ = "shared_plans"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    version_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    produced_by_role: Mapped[str] = mapped_column(String(8), nullable=False)
+    plan_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    is_current: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class KnowledgeChunkRecord(Base):
     __tablename__ = "knowledge_chunks"
 
@@ -149,4 +183,17 @@ class MemoryRecord(Base):
     memory_type: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     memory_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MemorySummaryRecord(Base):
+    __tablename__ = "memory_summaries"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

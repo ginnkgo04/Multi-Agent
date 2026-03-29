@@ -77,7 +77,14 @@ class ProviderRegistry:
             from langchain_openai import ChatOpenAI
         except ImportError as exc:  # pragma: no cover - exercised in environments without optional deps
             raise RuntimeError("LangChain chat dependencies are not installed. Install langchain and langchain-openai.") from exc
-        return config, ChatOpenAI(model=model, api_key=api_key, base_url=base_url, temperature=0.1)
+        return config, ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0.1,
+            use_responses_api=False,
+            output_version="v0",
+        )
 
     def resolve_embedding_provider(self, session: Session, name: str):
         config = self.get_config(session, name, ProviderKind.EMBEDDING)

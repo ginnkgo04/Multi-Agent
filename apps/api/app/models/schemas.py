@@ -53,6 +53,8 @@ class EventType(str, Enum):
     CYCLE_STARTED = "cycle_started"
     NODE_STARTED = "node_started"
     NODE_LOG = "node_log"
+    CONTEXT_INDEXED = "context_indexed"
+    CONTEXT_ASSEMBLED = "context_assembled"
     NODE_COMPLETED = "node_completed"
     NODE_FAILED = "node_failed"
     CHECKPOINT_SAVED = "checkpoint_saved"
@@ -92,6 +94,14 @@ class ProviderValidationRequest(BaseModel):
 class ProviderValidationResponse(BaseModel):
     ok: bool
     message: str
+
+
+class ContextSourceType(str, Enum):
+    KNOWLEDGE = "knowledge"
+    ARTIFACT = "artifact"
+    SHARED_PLAN = "shared_plan"
+    MEMORY = "memory"
+    REQUIREMENT = "requirement"
 
 
 class KnowledgeIngestRequest(BaseModel):
@@ -204,6 +214,19 @@ class RunDetail(RunRead):
     latest_artifacts: list[ArtifactManifest] = Field(default_factory=list)
 
 
+class ContextSource(BaseModel):
+    source_type: ContextSourceType
+    source_id: str | None = None
+    path: str | None = None
+    excerpt: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    score: float | None = None
+    scope: str | None = None
+    section: str | None = None
+    order_index: int | None = None
+    included: bool = True
+
+
 class AgentTaskContext(BaseModel):
     role: Role
     project_id: str
@@ -219,6 +242,50 @@ class AgentTaskContext(BaseModel):
     memories: list[str] = Field(default_factory=list)
     original_requirement: str
     template_context: dict[str, Any] = Field(default_factory=dict)
+    template_context_origin: str = "explicit"
+    context_sources: list[ContextSource] = Field(default_factory=list)
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SharedPlanVersionRead(BaseModel):
+    id: str
+    cycle_id: str
+    version_index: int
+    produced_by_role: str
+    summary: str
+    is_current: bool
+    created_at: datetime
+
+
+class SharedPlanRead(BaseModel):
+    run_id: str
+    latest_plan_id: str | None = None
+    latest_plan: dict[str, Any] = Field(default_factory=dict)
+    versions: list[SharedPlanVersionRead] = Field(default_factory=list)
+
+
+class MemorySummaryRead(BaseModel):
+    id: str
+    run_id: str
+    project_id: str | None = None
+    cycle_id: str
+    summary_type: str
+    content: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class NodeContextSourcesRead(BaseModel):
+    run_id: str
+    node_id: str
+    context_sources: list[ContextSource] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectTemplateProfileRead(BaseModel):
+    project_id: str
+    latest: MemorySummaryRead | None = None
+    versions: list[MemorySummaryRead] = Field(default_factory=list)
 
 
 class AgentTaskResult(BaseModel):

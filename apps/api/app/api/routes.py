@@ -8,7 +8,16 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.serializers import to_cycle_summary, to_project_read, to_run_detail, to_run_read
+from app.api.serializers import (
+    to_cycle_summary,
+    to_memory_summary_read,
+    to_node_context_sources_read,
+    to_project_read,
+    to_project_template_profile_read,
+    to_run_detail,
+    to_run_read,
+    to_shared_plan_read,
+)
 from app.config import get_settings
 from app.db import SessionLocal, get_session
 from app.models.records import CycleRecord, ProjectRecord, RunRecord
@@ -27,6 +36,10 @@ from app.models.schemas import (
     RunRequest,
     CycleSummary,
     ArtifactManifest,
+    MemorySummaryRead,
+    NodeContextSourcesRead,
+    ProjectTemplateProfileRead,
+    SharedPlanRead,
 )
 from app.services.container import get_container
 
@@ -36,7 +49,10 @@ settings = get_settings()
 
 @router.get("/health")
 def healthcheck() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "pc_ca_chat_path": "native-provider-fallback-v1",
+    }
 
 
 @router.get("/projects", response_model=list[ProjectRead])
@@ -68,7 +84,7 @@ def validate_provider(payload: ProviderValidationRequest) -> ProviderValidationR
 async def ingest_knowledge(payload: KnowledgeIngestRequest, session: Session = Depends(get_session)) -> dict[str, int]:
     container = get_container()
     _, embedding_provider = container.provider_registry.resolve_embedding_provider(session, settings.default_embedding_provider)
-    chunks = await container.rag_service.ingest(session, payload, embedding_provider)
+    chunks = await container.context_document_service.ingest_external_knowledge(session, payload, embedding_provider)
     return {"chunks": chunks}
 
 
@@ -81,11 +97,28 @@ async def create_run(payload: RunRequest, session: Session = Depends(get_session
     provider_name = payload.provider_name or settings.default_chat_provider
     embedding_provider_name = payload.embedding_provider_name or settings.default_embedding_provider
     run = container.requirement_intake.create_run(session, payload, provider_name, embedding_provider_name)
+    _, embedding_provider = container.provider_registry.resolve_embedding_provider(session, embedding_provider_name)
+    indexed_chunks = await container.context_document_service.index_requirement(session, run=run, embedding_provider=embedding_provider)
     await container.event_bus.publish(
         session,
         run_id=run.id,
         event_type=EventType.RUN_CREATED,
-        payload={"project_id": run.project_id, "requirement": run.requirement},
+        payload={
+            "project_id": run.project_id,
+            "requirement": run.requirement,
+            "template_context_origin": run.template_context_origin,
+            "indexed_requirement_chunks": indexed_chunks,
+        },
+    )
+    await container.event_bus.publish(
+        session,
+        run_id=run.id,
+        event_type=EventType.CONTEXT_INDEXED,
+        payload={
+            "source_type": "requirement",
+            "chunk_count": indexed_chunks,
+            "template_context_origin": run.template_context_origin,
+        },
     )
     await container.runtime.start_run(run.id)
     return to_run_read(run)
@@ -132,6 +165,48 @@ def get_run_cycles(run_id: str, session: Session = Depends(get_session)) -> list
         raise HTTPException(status_code=404, detail="Run not found.")
     cycles = session.scalars(select(CycleRecord).where(CycleRecord.run_id == run_id).order_by(CycleRecord.cycle_index)).all()
     return [to_cycle_summary(session, cycle) for cycle in cycles]
+
+
+@router.get("/runs/{run_id}/shared-plan", response_model=SharedPlanRead)
+def get_run_shared_plan(run_id: str, session: Session = Depends(get_session)) -> SharedPlanRead:
+    container = get_container()
+    run = session.get(RunRecord, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    records = container.context_document_service.list_shared_plans(session, run_id)
+    return to_shared_plan_read(run_id, records)
+
+
+@router.get("/runs/{run_id}/nodes/{node_id}/context-sources", response_model=NodeContextSourcesRead)
+def get_node_context_sources(run_id: str, node_id: str, session: Session = Depends(get_session)) -> NodeContextSourcesRead:
+    container = get_container()
+    run = session.get(RunRecord, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    snapshot = container.context_document_service.get_node_context_snapshot(session, run_id=run_id, node_id=node_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Node not found.")
+    return to_node_context_sources_read(run_id, node_id, snapshot)
+
+
+@router.get("/runs/{run_id}/memory-summaries", response_model=list[MemorySummaryRead])
+def get_run_memory_summaries(run_id: str, session: Session = Depends(get_session)) -> list[MemorySummaryRead]:
+    container = get_container()
+    run = session.get(RunRecord, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    records = container.memory_service.list_summaries(session, run_id)
+    return [to_memory_summary_read(record) for record in records]
+
+
+@router.get("/projects/{project_id}/template-profile", response_model=ProjectTemplateProfileRead)
+def get_project_template_profile(project_id: str, session: Session = Depends(get_session)) -> ProjectTemplateProfileRead:
+    container = get_container()
+    project = session.get(ProjectRecord, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    records = container.memory_service.list_project_template_profiles(session, project_id)
+    return to_project_template_profile_read(project_id, records)
 
 
 @router.post("/runs/{run_id}/resume", response_model=RunRead)

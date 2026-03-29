@@ -26,6 +26,7 @@ class WorkflowState(TypedDict, total=False):
     shared_plan_id: str | None
     manual_approval: bool
     template_context: dict[str, Any]
+    template_context_origin: str
     node_outputs: Annotated[dict[str, dict[str, Any]], _merge_mappings]
     artifact_refs: Annotated[dict[str, list[str]], _merge_mappings]
     last_completed_role: Annotated[str | None, _prefer_latest]

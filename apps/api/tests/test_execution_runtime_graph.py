@@ -72,6 +72,53 @@ def test_merge_state_combines_parallel_branch_updates() -> None:
     assert merged["artifact_refs"]["FD"] == ["artifact-1"]
 
 
+def test_merge_state_clears_cycle_scoped_mappings_when_transition_resets_them() -> None:
+    runtime = ExecutionRuntime(
+        registry={},
+        provider_registry=Stub(),
+        graph_builder=Stub(),
+        context_assembler=Stub(),
+        artifact_store=Stub(),
+        event_bus=Stub(),
+        memory_service=Stub(),
+        retry_manager=Stub(),
+        rag_service=Stub(),
+        checkpoint_store=Stub(),
+    )
+    base_state = {
+        "run_id": "run-1",
+        "cycle_id": "cycle-1",
+        "cycle_index": 1,
+        "node_outputs": {
+            "PC": {"requirement_brief": "brief"},
+            "QT": {"status": "FAIL"},
+        },
+        "artifact_refs": {"FD": ["artifact-1"]},
+        "retry_counts": {"FD": 2},
+        "next_action": "continue",
+    }
+
+    merged = runtime._merge_state(
+        base_state,
+        {
+            "cycle_id": "cycle-2",
+            "cycle_index": 2,
+            "node_outputs": {},
+            "artifact_refs": {},
+            "retry_counts": {},
+            "last_completed_role": None,
+            "shared_plan_id": None,
+            "next_action": "continue",
+        },
+    )
+
+    assert merged["cycle_id"] == "cycle-2"
+    assert merged["cycle_index"] == 2
+    assert merged["node_outputs"] == {}
+    assert merged["artifact_refs"] == {}
+    assert merged["retry_counts"] == {}
+
+
 @pytest.mark.anyio
 async def test_start_run_can_force_restart_existing_task() -> None:
     runtime = ExecutionRuntime(

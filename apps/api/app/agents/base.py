@@ -242,43 +242,15 @@ class WorkflowAgent:
         ).strip()
 
     def _build_user_prompt(self, context: AgentTaskContext) -> str:
-        if self.profile.role is Role.DE:
-            max_artifacts = 8
-            preview_limit = 220
-        elif self.profile.role is Role.QT:
-            max_artifacts = 8
-            preview_limit = 320
-        elif self.profile.role is Role.CA:
-            max_artifacts = 4
-            preview_limit = 360
-        else:
-            max_artifacts = 6
-            preview_limit = 500
-        upstream_sections = []
-        for artifact in context.upstream_artifacts[:max_artifacts]:
-            preview = self._normalize_prompt_text(artifact.metadata.get("content_preview", ""), limit=preview_limit)
-            upstream_sections.append(
-                f"- {artifact.name}\n  summary: {artifact.summary}\n  preview:\n{preview}"
-            )
-        if len(context.upstream_artifacts) > max_artifacts:
-            upstream_sections.append(f"- ... {len(context.upstream_artifacts) - max_artifacts} more artifacts omitted for brevity")
-        upstream = "\n".join(upstream_sections) or "- none"
-        retrieved = "\n".join(
-            f"- {self._normalize_prompt_text(item.get('source', 'knowledge'), limit=60)} "
-            f"(score={self._normalize_prompt_text(item.get('score', 'n/a'), limit=20)}): "
-            f"{self._normalize_prompt_text(item.get('content', ''), limit=240)}"
-            for item in context.retrieved_context
-        ) or "- none"
-        memories = "\n".join(f"- {self._normalize_prompt_text(item, limit=240)}" for item in context.memories) or "- none"
+        context_sources = getattr(context, "context_sources", []) or []
+        rendered_context_sources = self._render_context_sources(context_sources)
         sections = [
             self._format_prompt_section("ROLE", self.profile.role.value),
             self._format_prompt_section("REQUIREMENT", context.original_requirement),
             self._format_prompt_section("SHARED_PLAN_JSON", json.dumps(context.shared_plan, ensure_ascii=False, indent=2)),
             self._format_prompt_section("CURRENT_CYCLE", str(context.cycle_index)),
             self._format_prompt_section("TASK_SPEC_JSON", json.dumps(context.task_spec, ensure_ascii=False, indent=2)),
-            self._format_prompt_section("UPSTREAM_ARTIFACTS", upstream),
-            self._format_prompt_section("RETRIEVED_CONTEXT", retrieved),
-            self._format_prompt_section("MEMORIES", memories),
+            self._format_prompt_section("CONTEXT_SOURCES", rendered_context_sources),
         ]
         if context.template_context:
             sections.append(
@@ -288,6 +260,22 @@ class WorkflowAgent:
                 )
             )
         return "\n\n".join(sections)
+
+    def _render_context_sources(self, context_sources: list[Any]) -> str:
+        if not context_sources:
+            return "- none"
+        lines = []
+        for source in context_sources:
+            source_type = getattr(source, "source_type", None)
+            if hasattr(source_type, "value"):
+                source_type = source_type.value
+            path = getattr(source, "path", None) or getattr(source, "source_id", "unknown")
+            section = getattr(source, "section", None) or "context"
+            score = getattr(source, "score", None)
+            excerpt = self._normalize_prompt_text(getattr(source, "excerpt", ""), limit=320)
+            score_text = f" score={score}" if score is not None else ""
+            lines.append(f"- [{section}] {source_type or 'context'} {path}{score_text}: {excerpt}")
+        return "\n".join(lines)
 
     def _build_manifest_user_prompt(self, context: AgentTaskContext) -> str:
         return self._build_user_prompt(context) + "\n\nReturn the file manifest first. Do not inline file contents."
