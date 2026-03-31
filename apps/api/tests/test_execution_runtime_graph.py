@@ -119,6 +119,38 @@ def test_merge_state_clears_cycle_scoped_mappings_when_transition_resets_them() 
     assert merged["retry_counts"] == {}
 
 
+def test_quality_gate_requires_remediation_when_high_severity_defect_exists() -> None:
+    runtime = ExecutionRuntime(
+        registry={},
+        provider_registry=Stub(),
+        graph_builder=Stub(),
+        context_assembler=Stub(),
+        artifact_store=Stub(),
+        event_bus=Stub(),
+        memory_service=Stub(),
+        retry_manager=Stub(),
+        rag_service=Stub(),
+        checkpoint_store=Stub(),
+    )
+
+    assert runtime._qt_requires_remediation(
+        {
+            "status": "PASS",
+            "defect_list": [
+                {"id": "QT-001", "description": "Missing contact form", "severity": "high"},
+            ],
+        }
+    )
+    assert not runtime._qt_requires_remediation(
+        {
+            "status": "PASS",
+            "defect_list": [
+                {"id": "QT-002", "description": "Minor alt issue", "severity": "low"},
+            ],
+        }
+    )
+
+
 @pytest.mark.anyio
 async def test_start_run_can_force_restart_existing_task() -> None:
     runtime = ExecutionRuntime(

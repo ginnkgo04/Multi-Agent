@@ -1,0 +1,26 @@
+{
+  "must_have": [
+    "User registration and authentication system",
+    "Discussion categories and subforums",
+    "Thread creation and reply functionality",
+    "Basic post formatting (text, links)",
+    "User profiles with activity history",
+    "Responsive web design for mobile/desktop"
+  ],
+  "should_have": [
+    "Post voting/liking system",
+    "Rich text editor for posts",
+    "Search functionality across threads",
+    "User role system (admin, moderator, user)",
+    "Email notifications for replies",
+    "Image upload in posts"
+  ],
+  "could_have": [
+    "Real-time notifications",
+    "Private messaging between users",
+    "Advanced search filters",
+    "User reputation system",
+    "API for third-party integrations",
+    "Theming options"
+  ]
+}

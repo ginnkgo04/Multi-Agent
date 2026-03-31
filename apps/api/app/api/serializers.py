@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.base import WorkflowAgent
 from app.config import get_settings
 from app.models.records import CycleRecord, MemorySummaryRecord, NodeExecutionRecord, ProjectRecord, RunRecord, SharedPlanRecord
 from app.models.schemas import (
@@ -11,6 +12,7 @@ from app.models.schemas import (
     CycleSummary,
     MemorySummaryRead,
     NodeContextSourcesRead,
+    QualityDefect,
     QualityReport,
     ProjectTemplateProfileRead,
     ProjectRead,
@@ -144,9 +146,13 @@ def to_project_template_profile_read(project_id: str, records: list[MemorySummar
 def _normalize_quality_report(raw_report: dict | None) -> QualityReport | None:
     if not raw_report:
         return None
+    defects = [
+        QualityDefect.model_validate(defect)
+        for defect in WorkflowAgent._normalize_quality_defect_list(raw_report.get("defect_list", []))
+    ]
     return QualityReport(
-        status=str(raw_report.get("status", "FAIL")).upper(),
-        defect_list=_normalize_string_list(raw_report.get("defect_list", [])),
+        status=WorkflowAgent._normalize_quality_status(raw_report.get("status", "FAIL"), [defect.model_dump(mode="json") for defect in defects]),
+        defect_list=defects,
         root_cause_guess=_stringify_value(raw_report.get("root_cause_guess", "")),
         retest_scope=_normalize_string_list(raw_report.get("retest_scope", [])),
         remediation_requirement=_stringify_value(raw_report.get("remediation_requirement", "")),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import SecretStr
 from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -79,7 +80,7 @@ class ProviderRegistry:
             raise RuntimeError("LangChain chat dependencies are not installed. Install langchain and langchain-openai.") from exc
         return config, ChatOpenAI(
             model=model,
-            api_key=api_key,
+            api_key=SecretStr(api_key),
             base_url=base_url,
             temperature=0.1,
             use_responses_api=False,
@@ -110,7 +111,7 @@ class ProviderRegistry:
             from langchain_openai import OpenAIEmbeddings
         except ImportError as exc:  # pragma: no cover - exercised in environments without optional deps
             raise RuntimeError("LangChain embedding dependencies are not installed. Install langchain and langchain-openai.") from exc
-        return config, OpenAIEmbeddings(model=model, api_key=api_key, base_url=base_url)
+        return config, OpenAIEmbeddings(model=model, api_key=SecretStr(api_key), base_url=base_url)
 
     def validate(self, config: ProviderConfig) -> tuple[bool, str]:
         base_url = config.base_url or self._default_base_url(config.provider)

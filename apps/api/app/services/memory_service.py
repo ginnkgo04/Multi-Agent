@@ -35,9 +35,9 @@ class MemoryService:
         return [record.content for record in reversed(records)]
 
     def list_recent_records(self, session: Session, run_id: str, limit: int = 6) -> list[MemoryRecord]:
-        return session.scalars(
+        return list(session.scalars(
             select(MemoryRecord).where(MemoryRecord.run_id == run_id).order_by(desc(MemoryRecord.created_at)).limit(limit)
-        ).all()
+        ).all())
 
     def summarize_cycles(self, session: Session, run_id: str) -> list[str]:
         records = self.list_summaries(session, run_id, summary_type="cycle_summary")
@@ -71,17 +71,17 @@ class MemoryService:
         query = select(MemorySummaryRecord).where(MemorySummaryRecord.run_id == run_id).order_by(MemorySummaryRecord.created_at)
         if summary_type:
             query = query.where(MemorySummaryRecord.summary_type == summary_type)
-        return session.scalars(query).all()
+        return list(session.scalars(query).all())
 
     def list_project_template_profiles(self, session: Session, project_id: str) -> list[MemorySummaryRecord]:
-        return session.scalars(
+        return list(session.scalars(
             select(MemorySummaryRecord)
             .where(
                 MemorySummaryRecord.project_id == project_id,
                 MemorySummaryRecord.summary_type == "project_template_profile",
             )
             .order_by(MemorySummaryRecord.created_at.desc())
-        ).all()
+        ).all())
 
     def get_current_project_template_profile(self, session: Session, project_id: str) -> MemorySummaryRecord | None:
         for record in self.list_project_template_profiles(session, project_id):

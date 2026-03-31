@@ -49,7 +49,7 @@ class ContextBudgeter:
     def _drop_low_score_retrieved_docs(self, sources: list[dict[str, Any]], removed_items: list[dict[str, Any]]) -> None:
         retrieved = sorted(
             [source for source in sources if source.get("section") == "retrieved_docs" and source.get("included", True)],
-            key=lambda item: item.get("score") if item.get("score") is not None else -1.0,
+            key=lambda item: item.get("score") or float('inf'),
         )
         for source in retrieved:
             if sum(self._char_count(item) for item in sources if item.get("included")) <= self.char_budget:

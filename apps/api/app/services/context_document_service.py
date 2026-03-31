@@ -222,7 +222,7 @@ class ContextDocumentService:
         return session.scalar(select(SharedPlanRecord).where(SharedPlanRecord.run_id == run_id).order_by(desc(SharedPlanRecord.created_at)))
 
     def list_shared_plans(self, session: Session, run_id: str) -> list[SharedPlanRecord]:
-        return session.scalars(select(SharedPlanRecord).where(SharedPlanRecord.run_id == run_id).order_by(SharedPlanRecord.created_at)).all()
+        return list(session.scalars(select(SharedPlanRecord).where(SharedPlanRecord.run_id == run_id).order_by(SharedPlanRecord.created_at)).all())
 
     def get_node_context_snapshot(self, session: Session, *, run_id: str, node_id: str) -> dict[str, Any] | None:
         from app.models.records import NodeExecutionRecord

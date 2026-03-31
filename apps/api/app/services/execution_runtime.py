@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 
+from app.agents.base import WorkflowAgent
 from app.agents.runtime_types import WorkflowState
 from app.db import SessionLocal
 from app.models.records import CycleRecord, NodeExecutionRecord, RunRecord
@@ -121,10 +122,10 @@ class ExecutionRuntime:
             return
 
     def _hydrate_state(self, session, run: RunRecord, cycle: CycleRecord) -> tuple[str, WorkflowState]:
-        checkpoint = self.checkpoint_store.latest_for_cycle(session, run_id=run.id, cycle_id=cycle.id)
+        checkpoint = self.checkpoint_store.latest_for_cycle(session, run_id=run.id, cycle_id=cycle.id) if self.checkpoint_store else None
         graph_kind = checkpoint.graph_kind if checkpoint else ("initial" if cycle.cycle_index == 1 else "remediation")
         if checkpoint:
-            state = dict(checkpoint.serialized_state or {})
+            state: WorkflowState = dict(checkpoint.serialized_state or {})  # type: ignore
             state["run_id"] = run.id
             state["cycle_id"] = cycle.id
             state["cycle_index"] = cycle.cycle_index
@@ -190,17 +191,28 @@ class ExecutionRuntime:
 
     async def _execute_role(self, state: WorkflowState, role: Role, graph_kind: str) -> WorkflowState:
         while True:
+            run_id = state.get("run_id")
+            cycle_id = state.get("cycle_id")
+            if run_id is None or cycle_id is None:
+                raise ValueError("Workflow state is missing run_id or cycle_id.")
             with SessionLocal() as session:
-                run = session.get(RunRecord, state["run_id"])
-                cycle = session.get(CycleRecord, state["cycle_id"])
+                run = session.get(RunRecord, run_id)
+                cycle = session.get(CycleRecord, cycle_id)
                 node = session.scalar(
                     select(NodeExecutionRecord).where(
-                        NodeExecutionRecord.cycle_id == state["cycle_id"],
+                        NodeExecutionRecord.cycle_id == cycle_id,
                         NodeExecutionRecord.role == role.value,
                     )
                 )
                 if run is None or cycle is None or node is None:
                     raise ValueError("Workflow node could not be loaded from the database.")
+                assert run is not None and cycle is not None and node is not None
+                run_event_id = run.id
+                cycle_event_id = cycle.id
+                node_event_id = node.id
+                node_role = node.role
+                if run_event_id is None or cycle_event_id is None or node_event_id is None or node_role is None:
+                    raise ValueError("Workflow node identity fields are missing.")
                 if node.status == NodeStatus.COMPLETED.value:
                     return self._sync_state_from_node(state, node, cycle)
                 self.retry_manager.mark_node_running(session, node)
@@ -250,12 +262,12 @@ class ExecutionRuntime:
                     )
                     await self.event_bus.publish(
                         session,
-                        run_id=run.id,
+                        run_id=run_event_id,
                         event_type=EventType.CONTEXT_ASSEMBLED,
-                        cycle_id=cycle.id,
-                        node_id=node.id,
+                        cycle_id=cycle_event_id,
+                        node_id=node_event_id,
                         payload={
-                            "role": node.role,
+                            "role": node_role,
                             "context_sources": [source.model_dump(mode="json") for source in context.context_sources],
                             "metadata": context.context_metadata,
                         },
@@ -264,12 +276,12 @@ class ExecutionRuntime:
                     async def tool_logger(tool_name: str, status: str, payload: dict[str, Any] | None = None) -> None:
                         await self.event_bus.publish(
                             session,
-                            run_id=run.id,
+                            run_id=run_event_id,
                             event_type=EventType.NODE_LOG,
-                            cycle_id=cycle.id,
-                            node_id=node.id,
+                            cycle_id=cycle_event_id,
+                            node_id=node_event_id,
                             payload={
-                                "role": node.role,
+                                "role": node_role,
                                 "tool_name": tool_name,
                                 "status": status,
                                 **(payload or {}),
@@ -398,9 +410,13 @@ class ExecutionRuntime:
                     raise
 
     async def _transition_cycle(self, state: WorkflowState) -> WorkflowState:
+        run_id = state.get("run_id")
+        cycle_id = state.get("cycle_id")
+        if run_id is None or cycle_id is None:
+            raise ValueError("Workflow state is missing run_id or cycle_id.")
         with SessionLocal() as session:
-            run = session.get(RunRecord, state["run_id"])
-            cycle = session.get(CycleRecord, state["cycle_id"])
+            run = session.get(RunRecord, run_id)
+            cycle = session.get(CycleRecord, cycle_id)
             if run is None or cycle is None:
                 raise ValueError("Workflow transition could not load run state.")
             qt_node = session.scalar(
@@ -459,6 +475,12 @@ class ExecutionRuntime:
     def _route_after_qt(self, state: WorkflowState) -> str:
         return "transition" if state.get("next_action") == "continue" else "complete"
 
+    @staticmethod
+    def _qt_requires_remediation(result_payload: dict[str, Any]) -> bool:
+        defects = WorkflowAgent._normalize_quality_defect_list(result_payload.get("defect_list", []))
+        status = WorkflowAgent._normalize_quality_status(result_payload.get("status", "FAIL"), defects)
+        return status == "FAIL"
+
     def _next_state(
         self,
         state: WorkflowState,
@@ -482,16 +504,25 @@ class ExecutionRuntime:
         if role is not Role.QT:
             return state_update
 
-        status = str(result_payload.get("status", "FAIL")).upper()
+        defects = WorkflowAgent._normalize_quality_defect_list(result_payload.get("defect_list", []))
+        status = WorkflowAgent._normalize_quality_status(result_payload.get("status", "FAIL"), defects)
+        result_payload = {
+            **result_payload,
+            "status": status,
+            "defect_list": defects,
+        }
         state_update["next_action"] = "complete"
+        run_id = state.get("run_id")
+        if run_id is None:
+            return state_update
         with SessionLocal() as session:
-            run = session.get(RunRecord, state["run_id"])
+            run = session.get(RunRecord, run_id)
             current_cycle = session.get(CycleRecord, cycle.id)
             if run is None or current_cycle is None:
                 return state_update
             current_cycle.quality_report = result_payload
             current_cycle.updated_at = datetime.now(timezone.utc)
-            if status == "FAIL":
+            if self._qt_requires_remediation(result_payload):
                 current_cycle.status = CycleStatus.FAILED.value
                 if current_cycle.cycle_index >= run.max_cycles:
                     run.status = RunStatus.FAILED_MAX_CYCLES.value
@@ -514,15 +545,15 @@ class ExecutionRuntime:
         }
         if node.role in {Role.PC.value, Role.CA.value}:
             with SessionLocal() as session:
-                shared_plan = self.context_document_service.get_current_shared_plan(session, state["run_id"])
+                shared_plan = self.context_document_service.get_current_shared_plan(session, state.get("run_id"))
                 if shared_plan is not None:
                     state_update["shared_plan_id"] = shared_plan.id
         if node.role == Role.QT.value:
-            state_update["next_action"] = "continue" if (node.result_payload or {}).get("status") == "FAIL" else "complete"
+            state_update["next_action"] = "continue" if self._qt_requires_remediation(node.result_payload or {}) else "complete"
         return state_update
 
     def _merge_state(self, base_state: WorkflowState, state_update: WorkflowState) -> WorkflowState:
-        merged: WorkflowState = dict(base_state)
+        merged: WorkflowState = cast(WorkflowState, dict(base_state))
         for key, value in state_update.items():
             if key in {"node_outputs", "artifact_refs", "retry_counts"}:
                 if value == {}:
@@ -530,27 +561,34 @@ class ExecutionRuntime:
                     continue
                 merged[key] = {
                     **dict(merged.get(key, {})),
-                    **dict(value or {}),
+                    **dict(value if isinstance(value, dict) else {}),
                 }
             else:
                 merged[key] = value
         return merged
 
     async def _save_checkpoint(self, session, state: WorkflowState, graph_kind: str) -> None:
+        if self.checkpoint_store is None:
+            return
+        run_id = state.get("run_id")
+        cycle_id = state.get("cycle_id")
+        cycle_index = state.get("cycle_index")
+        if run_id is None or cycle_id is None or cycle_index is None:
+            raise ValueError("Workflow state is missing checkpoint identity fields.")
         record = self.checkpoint_store.save(
             session,
-            run_id=state["run_id"],
-            cycle_id=state["cycle_id"],
-            cycle_index=state["cycle_index"],
+            run_id=run_id,
+            cycle_id=cycle_id,
+            cycle_index=cycle_index,
             graph_kind=graph_kind,
             last_completed_role=state.get("last_completed_role"),
             serialized_state=dict(state),
         )
         await self.event_bus.publish(
             session,
-            run_id=state["run_id"],
+            run_id=run_id,
             event_type=EventType.CHECKPOINT_SAVED,
-            cycle_id=state["cycle_id"],
+            cycle_id=cycle_id,
             payload={
                 "checkpoint_id": record.id,
                 "graph_kind": graph_kind,

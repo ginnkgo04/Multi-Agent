@@ -51,7 +51,7 @@
   - `RunnableLambda` 组装输入
   - `ChatOpenAI.with_structured_output(PydanticSchema)`
 - `PC` 和 `CA` 都必须有独立输出 schema，不再依赖自由 JSON 解析。
-- `FD / BD / DE / QT` 使用工具调用 Agent，固定通过 `LangChain` AgentExecutor 运行，不允许继续直接拼 prompt 后让模型裸返回。
+- `FD / BD / DE / QT` 使用工具调用 Agent，固定通过 `LangChain v1 create_agent` 运行，不允许继续直接拼 prompt 后让模型裸返回。
 - 这 4 个角色统一使用以下工具集：
   - `get_requirement()`
   - `get_shared_plan()`
@@ -151,6 +151,6 @@
 ## Assumptions
 - `v0.2` 仅支持现有 `openai-compatible` provider 体系，不扩展多厂商适配层。
 - `FD / BD / DE / QT` 的工具调用只面向平台内部能力，不加入 shell、测试执行、代码运行工具。
-- `PC / CA` 不使用 AgentExecutor，只使用 LCEL，保证实现简单且答辩时口径清晰。
+- `PC / CA` 不使用工具调用 Agent 执行器，只使用 LCEL，保证实现简单且答辩时口径清晰。
 - `RAG` 在 `v0.2` 只作为工具化检索能力接入，不在本版本实现自动索引产物、长期记忆分层和统一上下文仓库。
 - 现有数据库和前端页面保持兼容优先；`v0.2` 不做大规模页面重构，只保证数据层和运行路径真实切到 LangGraph / LangChain。

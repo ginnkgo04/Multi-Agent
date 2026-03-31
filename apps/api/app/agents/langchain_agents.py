@@ -27,14 +27,6 @@ def _legacy_agent(role: Role) -> WorkflowAgent:
 def _json_blob(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
-
-def _assert_required_paths(role: Role, artifacts: list[dict[str, Any]]) -> None:
-    names = {artifact["name"] for artifact in artifacts}
-    missing = [path for path in ROLE_SPECS[role]["required_paths"] if path not in names]
-    if missing:
-        raise ValueError(f"{role.value} is missing required artifact paths: {', '.join(missing)}")
-
-
 class LangChainLCELAgent:
     def __init__(self, role: Role) -> None:
         self.role = role
@@ -59,8 +51,7 @@ class LangChainLCELAgent:
         confidence = float(payload.get("confidence", 0.72))
         result_payload = self.legacy._normalize_result_payload(payload)
         artifacts = self._build_artifacts(context, result_payload)
-        self.legacy._validate_artifacts(artifacts)
-        _assert_required_paths(self.role, artifacts)
+        self.legacy._validate_artifacts(context, artifacts)
         return AgentTaskResult(
             summary=summary,
             artifact_list=artifacts,
@@ -133,11 +124,21 @@ class LangChainLCELAgent:
             Return ONLY one JSON object. Do not use markdown fences and do not add commentary.
             Required keys:
             - shared_plan: structured implementation plan object
+              - shared_plan.execution_contract.frontend.stack_id
+              - shared_plan.execution_contract.frontend.required_paths
+              - shared_plan.execution_contract.frontend.constraints
+              - shared_plan.execution_contract.backend.stack_id
+              - shared_plan.execution_contract.backend.required_paths
+              - shared_plan.execution_contract.backend.constraints
             - interfaces: array of contracts or APIs
             - architecture_decisions: array of key technical decisions
             - summary: short stage summary
             - handoff_notes: concise next-step notes
             - confidence: float between 0 and 1
+            Execution contract path rules:
+            - shared_plan.execution_contract.frontend.required_paths may only contain paths under workspace/frontend/ or implementation/frontend/
+            - shared_plan.execution_contract.backend.required_paths may only contain paths under workspace/backend/ or implementation/backend/
+            - Never emit repo-root paths like index.html, styles.css, app.py, or README.md in execution_contract.required_paths
             """
         ).strip()
 
@@ -364,8 +365,7 @@ class LangChainToolAgent:
             if not buffer.submitted:
                 raise ValueError(f"{self.role.value} must call submit_result before finishing.")
 
-            self.legacy._validate_artifacts(buffer.artifacts)
-            _assert_required_paths(self.role, buffer.artifacts)
+            self.legacy._validate_artifacts(context, buffer.artifacts)
             result_payload = self.legacy._normalize_result_payload(buffer.result_payload)
             return AgentTaskResult(
                 summary=buffer.summary,
@@ -392,56 +392,31 @@ class LangChainToolAgent:
         prompt_text = self._human_prompt(context)
         system_prompt = self._system_prompt(context)
         try:
-            from langchain.agents import AgentExecutor, create_tool_calling_agent
-            from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        except ImportError as old_api_exc:
-            try:
-                from langchain.agents import create_agent
-            except ImportError as new_api_exc:  # pragma: no cover - depends on optional packages
-                raise RuntimeError(
-                    "LangChain agent API is unavailable in the current runtime. "
-                    f"Legacy import failed: {old_api_exc}. New API import failed: {new_api_exc}."
-                ) from new_api_exc
+            from langchain.agents import create_agent
+        except ImportError as exc:  # pragma: no cover - depends on optional packages
+            raise RuntimeError(
+                "LangChain v1 agent API is unavailable in the current runtime. "
+                f"Import failed: {exc}."
+            ) from exc
 
-            agent = create_agent(
-                model=chat_model,
-                tools=tools,
-                system_prompt=system_prompt,
-                name=f"{self.role.value.lower()}-tool-agent",
-            )
-            await asyncio.wait_for(
-                agent.ainvoke({"messages": [{"role": "user", "content": prompt_text}]}),
-                timeout=self.settings.multi_agent_task_timeout_seconds,
-            )
-            return
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-        agent = create_tool_calling_agent(chat_model, tools, prompt)
-        executor = AgentExecutor(
-            agent=agent,
+        agent = create_agent(
+            model=chat_model,
             tools=tools,
-            return_intermediate_steps=True,
-            verbose=False,
-            max_iterations=20,
+            system_prompt=system_prompt,
+            name=f"{self.role.value.lower()}-tool-agent",
         )
         await asyncio.wait_for(
-            executor.ainvoke({"input": prompt_text}),
+            agent.ainvoke({"messages": [{"role": "user", "content": prompt_text}]}),
             timeout=self.settings.multi_agent_task_timeout_seconds,
         )
 
     def _system_prompt(self, context: AgentTaskContext) -> str:
         spec = ROLE_SPECS[self.role]
-        required_paths = "\n".join(f"- {path}" for path in spec["required_paths"])
+        required_paths = "\n".join(f"- {path}" for path in self.legacy._required_paths_for_context(context))
         dynamic_note = ""
         if context.template_context:
             dynamic_note = f"\nTemplate context is available in the prompt and may be used when relevant.\n"
-        return dedent(
+        prompt = dedent(
             f"""
             You are the {spec['title']} in a LangGraph + LangChain multi-agent delivery workflow.
             Use tools to inspect the requirement, shared plan, upstream artifacts, and optional retrieved context.
@@ -459,6 +434,10 @@ class LangChainToolAgent:
             {dynamic_note}
             """
         ).strip()
+        execution_guidance = self.legacy._execution_guidance_block(context)
+        if execution_guidance:
+            prompt = f"{prompt}\n{execution_guidance}"
+        return prompt
 
     def _human_prompt(self, context: AgentTaskContext) -> str:
         return self.legacy._build_user_prompt(context)

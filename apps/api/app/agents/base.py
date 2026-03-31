@@ -34,7 +34,7 @@ ROLE_SPECS: dict[Role, dict[str, Any]] = {
     },
     Role.FD: {
         "title": "Frontend Developer",
-        "goal": "Generate real frontend source files for the task workspace using Next.js App Router conventions.",
+        "goal": "Generate real frontend source files for the task workspace using the resolved implementation contract for this run.",
         "generation_mode": "manifest_then_files",
         "required_prefixes": ["workspace/frontend/", "implementation/frontend/"],
         "required_paths": [
@@ -49,7 +49,7 @@ ROLE_SPECS: dict[Role, dict[str, Any]] = {
     },
     Role.BD: {
         "title": "Backend Developer",
-        "goal": "Generate real backend source files for the task workspace using FastAPI conventions.",
+        "goal": "Generate real backend source files for the task workspace using the resolved implementation contract for this run.",
         "generation_mode": "manifest_then_files",
         "required_prefixes": ["workspace/backend/", "implementation/backend/"],
         "required_paths": [
@@ -83,8 +83,44 @@ ROLE_SPECS: dict[Role, dict[str, Any]] = {
             "quality/report.md",
             "quality/test_plan.md",
         ],
-        "payload_contract": "result_payload must include status (PASS or FAIL), defect_list, retest_scope, and remediation_requirement.",
+        "payload_contract": "result_payload must include status (PASS or FAIL), defect_list as an array of objects with id, description, severity (low|medium|high), location, suggestion, plus retest_scope and remediation_requirement. Any high-severity defect requires remediation.",
     },
+}
+
+DEFAULT_TEMPLATE_STACK = "next-fastapi"
+
+TEMPLATE_STACK_ALIASES: dict[str, str] = {
+    "next-fastapi": DEFAULT_TEMPLATE_STACK,
+    "next-fastapi-template": DEFAULT_TEMPLATE_STACK,
+}
+
+ROLE_EXECUTION_CONTRACT_KEYS: dict[Role, str] = {
+    Role.FD: "frontend",
+    Role.BD: "backend",
+}
+
+ROLE_ALLOWED_ROOTS: dict[Role, tuple[str, ...]] = {
+    Role.FD: ("workspace/frontend/", "implementation/frontend/"),
+    Role.BD: ("workspace/backend/", "implementation/backend/"),
+}
+
+DEFAULT_TEMPLATE_EXECUTION_PROFILES: dict[str, dict[Role, dict[str, Any]]] = {
+    DEFAULT_TEMPLATE_STACK: {
+        Role.FD: {
+            "stack_id": "nextjs-app-router",
+            "required_paths": list(ROLE_SPECS[Role.FD]["required_paths"]),
+            "constraints": [
+                "Use Next.js App Router conventions unless CA overrides them.",
+            ],
+        },
+        Role.BD: {
+            "stack_id": "fastapi",
+            "required_paths": list(ROLE_SPECS[Role.BD]["required_paths"]),
+            "constraints": [
+                "Use FastAPI conventions unless CA overrides them.",
+            ],
+        },
+    }
 }
 
 
@@ -93,6 +129,14 @@ class AgentProfile:
     role: Role
     system_prompt: str
     artifact_prefix: str
+
+
+@dataclass(slots=True)
+class ExecutionProfile:
+    stack_id: str
+    required_paths: list[str]
+    constraints: list[str]
+    source: str
 
 
 class WorkflowAgent:
@@ -119,7 +163,7 @@ class WorkflowAgent:
         )
         payload = self._parse_model_response(raw_response)
         artifacts = self._normalize_artifacts(context, payload.get("artifacts", []))
-        self._validate_artifacts(artifacts)
+        self._validate_artifacts(context, artifacts)
         result_payload = self._normalize_result_payload(payload.get("result_payload", {}))
         return AgentTaskResult(
             summary=str(payload.get("summary", "Generated implementation artifacts.")),
@@ -130,9 +174,9 @@ class WorkflowAgent:
         )
 
     async def _execute_manifest_then_files(self, context: AgentTaskContext, provider: ChatProvider) -> AgentTaskResult:
-        spec = ROLE_SPECS[self.profile.role]
+        required_paths = self._required_paths_for_context(context)
         manifest_response = await provider.generate(
-            system_prompt=self._build_manifest_system_prompt(),
+            system_prompt=self._build_manifest_system_prompt(context),
             user_prompt=self._build_manifest_user_prompt(context),
             metadata={
                 "role": self.profile.role.value,
@@ -145,13 +189,13 @@ class WorkflowAgent:
         )
         payload = self._parse_model_response(manifest_response)
         manifest_artifacts = self._normalize_artifacts(context, payload.get("artifacts", []))
-        self._validate_artifacts(manifest_artifacts)
+        self._validate_artifacts(context, manifest_artifacts)
 
         generated_artifacts: list[dict[str, Any]] = []
         for artifact in manifest_artifacts:
             content = await provider.generate(
                 system_prompt=self._build_file_system_prompt(artifact),
-                user_prompt=self._build_file_user_prompt(context, payload.get("result_payload", {}), artifact, spec["required_paths"]),
+                user_prompt=self._build_file_user_prompt(context, payload.get("result_payload", {}), artifact, required_paths),
                 metadata={
                     "role": self.profile.role.value,
                     "cycle_index": context.cycle_index,
@@ -162,6 +206,7 @@ class WorkflowAgent:
                 },
             )
             generated_artifacts.append({**artifact, "content": self._strip_code_fences(content)})
+        self._validate_artifacts(context, generated_artifacts)
 
         return AgentTaskResult(
             summary=str(payload.get("summary", "Generated implementation artifacts.")),
@@ -173,8 +218,8 @@ class WorkflowAgent:
 
     def _build_system_prompt(self, context: AgentTaskContext) -> str:
         spec = ROLE_SPECS[self.profile.role]
-        required_paths = "\n".join(f"- {path}" for path in spec["required_paths"])
-        return dedent(
+        required_paths = "\n".join(f"- {path}" for path in self._required_paths_for_context(context))
+        prompt = dedent(
             f"""
             You are the {spec['title']} in a multi-agent software delivery system.
             Your job is to {spec['goal']}
@@ -206,11 +251,15 @@ class WorkflowAgent:
             - {spec['payload_contract']}
             """
         ).strip()
+        execution_guidance = self._execution_guidance_block(context)
+        if execution_guidance:
+            prompt = f"{prompt}\n{execution_guidance}"
+        return prompt
 
-    def _build_manifest_system_prompt(self) -> str:
+    def _build_manifest_system_prompt(self, context: AgentTaskContext) -> str:
         spec = ROLE_SPECS[self.profile.role]
-        required_paths = "\n".join(f"- {path}" for path in spec["required_paths"])
-        return dedent(
+        required_paths = "\n".join(f"- {path}" for path in self._required_paths_for_context(context))
+        prompt = dedent(
             f"""
             You are the {spec['title']} in a multi-agent software delivery system.
             Your job is to {spec['goal']}
@@ -240,6 +289,10 @@ class WorkflowAgent:
             - {spec['payload_contract']}
             """
         ).strip()
+        execution_guidance = self._execution_guidance_block(context)
+        if execution_guidance:
+            prompt = f"{prompt}\n{execution_guidance}"
+        return prompt
 
     def _build_user_prompt(self, context: AgentTaskContext) -> str:
         context_sources = getattr(context, "context_sources", []) or []
@@ -259,6 +312,14 @@ class WorkflowAgent:
                     json.dumps(context.template_context, ensure_ascii=False, indent=2),
                 )
             )
+        execution_payload = self._execution_prompt_payload(context)
+        if execution_payload is not None:
+            sections.append(
+                self._format_prompt_section(
+                    "RESOLVED_EXECUTION_CONFIG_JSON",
+                    json.dumps(execution_payload, ensure_ascii=False, indent=2),
+                )
+            )
         return "\n\n".join(sections)
 
     def _render_context_sources(self, context_sources: list[Any]) -> str:
@@ -267,7 +328,7 @@ class WorkflowAgent:
         lines = []
         for source in context_sources:
             source_type = getattr(source, "source_type", None)
-            if hasattr(source_type, "value"):
+            if source_type is not None and hasattr(source_type, "value"):
                 source_type = source_type.value
             path = getattr(source, "path", None) or getattr(source, "source_id", "unknown")
             section = getattr(source, "section", None) or "context"
@@ -341,6 +402,15 @@ class WorkflowAgent:
             self._format_prompt_section("UPSTREAM_ARTIFACTS", upstream),
             self._format_prompt_section("RETRIEVED_CONTEXT", retrieved),
         ]
+        execution_payload = self._execution_prompt_payload(context)
+        if execution_payload is not None:
+            sections.insert(
+                5,
+                self._format_prompt_section(
+                    "RESOLVED_EXECUTION_CONFIG_JSON",
+                    json.dumps(execution_payload, ensure_ascii=False, indent=2),
+                ),
+            )
         return "\n\n".join(sections)
 
     def _parse_model_response(self, raw_response: str) -> dict[str, Any]:
@@ -376,27 +446,32 @@ class WorkflowAgent:
             raise ValueError(f"{self.profile.role.value} returned no artifacts.")
         return normalized
 
-    def _validate_artifacts(self, artifacts: list[dict[str, Any]]) -> None:
-        required_prefixes = ROLE_SPECS[self.profile.role]["required_prefixes"]
+    def _validate_artifacts(self, context: AgentTaskContext, artifacts: list[dict[str, Any]]) -> None:
+        required_prefixes = self._required_prefixes_for_context(context)
+        required_paths = self._required_paths_for_context(context)
         names = [artifact["name"] for artifact in artifacts]
         for prefix in required_prefixes:
             if not any(name.startswith(prefix) for name in names):
                 raise ValueError(f"{self.profile.role.value} must produce at least one artifact under '{prefix}'.")
+        missing = [path for path in required_paths if path not in names]
+        if missing:
+            raise ValueError(f"{self.profile.role.value} is missing required artifact paths: {', '.join(missing)}")
         for artifact in artifacts:
             if not artifact["name"] or ".." in artifact["name"].split("/"):
                 raise ValueError(f"{self.profile.role.value} produced an invalid artifact path: {artifact['name']}")
 
     @staticmethod
     def _normalize_qt_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        status = str(payload.get("status", "FAIL")).upper()
-        if status not in {"PASS", "FAIL"}:
-            status = "FAIL"
+        defects = WorkflowAgent._normalize_quality_defect_list(payload.get("defect_list", []))
+        status = WorkflowAgent._normalize_quality_status(payload.get("status", "FAIL"), defects)
         return {
             "status": status,
-            "defect_list": WorkflowAgent._normalize_string_list(payload.get("defect_list", [])),
+            "defect_list": defects,
             "root_cause_guess": WorkflowAgent._stringify_value(payload.get("root_cause_guess", "")),
             "retest_scope": WorkflowAgent._normalize_string_list(payload.get("retest_scope", [])),
-            "remediation_requirement": payload.get("remediation_requirement", "Investigate the failed quality gate and regenerate the affected implementation files."),
+            "remediation_requirement": WorkflowAgent._stringify_value(
+                payload.get("remediation_requirement", "Investigate the failed quality gate and regenerate the affected implementation files.")
+            ),
         }
 
     def _normalize_result_payload(self, payload: Any) -> dict[str, Any]:
@@ -425,11 +500,173 @@ class WorkflowAgent:
 
     @staticmethod
     def _normalize_ca_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        shared_plan = WorkflowAgent._normalize_mapping(payload.get("shared_plan", payload))
+        top_level_execution_contract = payload.get("execution_contract")
+        if top_level_execution_contract and "execution_contract" not in shared_plan:
+            shared_plan["execution_contract"] = WorkflowAgent._normalize_mapping(top_level_execution_contract)
         return {
-            "shared_plan": WorkflowAgent._normalize_mapping(payload.get("shared_plan", payload)),
+            "shared_plan": shared_plan,
             "interfaces": WorkflowAgent._normalize_list_of_mappings(payload.get("interfaces", [])),
             "architecture_decisions": WorkflowAgent._normalize_string_list(payload.get("architecture_decisions", [])),
         }
+
+    def _required_paths_for_context(self, context: AgentTaskContext) -> list[str]:
+        execution_profile = self._resolve_execution_profile(context)
+        if execution_profile is not None:
+            return list(execution_profile.required_paths)
+        return list(ROLE_SPECS[self.profile.role]["required_paths"])
+
+    def _required_prefixes_for_context(self, context: AgentTaskContext) -> list[str]:
+        execution_profile = self._resolve_execution_profile(context)
+        if execution_profile is None:
+            return list(ROLE_SPECS[self.profile.role]["required_prefixes"])
+        roots = ROLE_ALLOWED_ROOTS[self.profile.role]
+        prefixes: list[str] = []
+        for path in execution_profile.required_paths:
+            for root in roots:
+                if path.startswith(root) and root not in prefixes:
+                    prefixes.append(root)
+        return prefixes or list(ROLE_SPECS[self.profile.role]["required_prefixes"])
+
+    def _execution_prompt_payload(self, context: AgentTaskContext) -> dict[str, Any] | None:
+        execution_profile = self._resolve_execution_profile(context)
+        if execution_profile is None:
+            return None
+        return {
+            "source": execution_profile.source,
+            "stack_id": execution_profile.stack_id,
+            "required_paths": execution_profile.required_paths,
+            "constraints": execution_profile.constraints,
+        }
+
+    def _execution_guidance_block(self, context: AgentTaskContext) -> str:
+        execution_profile = self._resolve_execution_profile(context)
+        if execution_profile is None:
+            return ""
+        lines = [
+            "Execution contract rules:",
+            "- Follow CA shared_plan.execution_contract first when it defines this role.",
+            "- The project template is only a fallback when CA does not define an execution_contract for this role.",
+            f"- Resolved stack_id for this run: {execution_profile.stack_id} (source: {execution_profile.source}).",
+        ]
+        if execution_profile.constraints:
+            lines.append("- Resolved execution constraints:")
+            lines.extend(f"  - {constraint}" for constraint in execution_profile.constraints)
+        return "\n".join(lines)
+
+    def _resolve_execution_profile(self, context: AgentTaskContext) -> ExecutionProfile | None:
+        contract_key = ROLE_EXECUTION_CONTRACT_KEYS.get(self.profile.role)
+        if contract_key is None:
+            return None
+
+        shared_contract = context.shared_plan.get("execution_contract")
+        if shared_contract not in (None, {}):
+            try:
+                if not isinstance(shared_contract, dict):
+                    raise ValueError(
+                        f"{self.profile.role.value} received an invalid CA execution contract: execution_contract must be an object."
+                    )
+                role_contract = shared_contract.get(contract_key)
+                if role_contract is not None:
+                    return self._parse_ca_execution_profile(contract_key, role_contract)
+            except ValueError as exc:
+                return self._template_execution_profile(
+                    context,
+                    invalid_contract_reason=str(exc),
+                )
+
+        return self._template_execution_profile(context)
+
+    def _template_execution_profile(
+        self,
+        context: AgentTaskContext,
+        *,
+        invalid_contract_reason: str | None = None,
+    ) -> ExecutionProfile:
+        template_key, template_source = self._resolve_template_stack(context.template_context)
+        role_profile = DEFAULT_TEMPLATE_EXECUTION_PROFILES[template_key][self.profile.role]
+        source = template_source
+        if invalid_contract_reason:
+            source = f"{template_source} (fallback after invalid CA execution contract: {invalid_contract_reason})"
+        return ExecutionProfile(
+            stack_id=str(role_profile["stack_id"]),
+            required_paths=list(role_profile["required_paths"]),
+            constraints=list(role_profile.get("constraints", [])),
+            source=source,
+        )
+
+    def _parse_ca_execution_profile(self, contract_key: str, role_contract: Any) -> ExecutionProfile:
+        role = self.profile.role
+        allowed_roots = ROLE_ALLOWED_ROOTS[role]
+        if not isinstance(role_contract, dict):
+            raise ValueError(
+                f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key} must be an object."
+            )
+
+        stack_id = self._stringify_value(role_contract.get("stack_id")).strip()
+        if not stack_id:
+            raise ValueError(
+                f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key}.stack_id must be a non-empty string."
+            )
+
+        required_paths_raw = role_contract.get("required_paths")
+        if not isinstance(required_paths_raw, list):
+            raise ValueError(
+                f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key}.required_paths must be an array."
+            )
+
+        normalized_paths: list[str] = []
+        for item in required_paths_raw:
+            normalized_path = self._normalize_relative_path(item)
+            if not normalized_path:
+                raise ValueError(
+                    f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key}.required_paths contains an invalid path."
+                )
+            if not any(normalized_path.startswith(root) for root in allowed_roots):
+                allowed_text = " or ".join(allowed_roots)
+                raise ValueError(
+                    f"{role.value} received an invalid CA execution contract: path '{normalized_path}' must stay under {allowed_text}."
+                )
+            if normalized_path not in normalized_paths:
+                normalized_paths.append(normalized_path)
+        if not normalized_paths:
+            raise ValueError(
+                f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key}.required_paths must contain at least one path."
+            )
+
+        constraints_raw = role_contract.get("constraints", [])
+        if constraints_raw is None:
+            constraints = []
+        elif not isinstance(constraints_raw, list):
+            raise ValueError(
+                f"{role.value} received an invalid CA execution contract: execution_contract.{contract_key}.constraints must be an array."
+            )
+        else:
+            constraints = []
+            for item in constraints_raw:
+                text = self._stringify_value(item).strip()
+                if text:
+                    constraints.append(text)
+
+        return ExecutionProfile(
+            stack_id=stack_id,
+            required_paths=normalized_paths,
+            constraints=constraints,
+            source=f"shared_plan.execution_contract.{contract_key}",
+        )
+
+    @staticmethod
+    def _resolve_template_stack(template_context: dict[str, Any]) -> tuple[str, str]:
+        for source, raw_value in (
+            ("template_context.stack", template_context.get("stack")),
+            ("template_context.project_template", template_context.get("project_template")),
+        ):
+            if raw_value is None:
+                continue
+            normalized = TEMPLATE_STACK_ALIASES.get(str(raw_value).strip().lower())
+            if normalized:
+                return normalized, source
+        return DEFAULT_TEMPLATE_STACK, "default-template"
 
     @staticmethod
     def _normalize_fd_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -629,6 +866,71 @@ class WorkflowAgent:
             return normalized
         text = WorkflowAgent._stringify_value(value).strip()
         return [text] if text else []
+
+    @staticmethod
+    def _normalize_quality_status(status_value: Any, defects: list[dict[str, str]]) -> str:
+        status = str(status_value or "FAIL").upper()
+        if status not in {"PASS", "FAIL"}:
+            status = "FAIL"
+        if any(defect.get("severity") == "high" for defect in defects):
+            return "FAIL"
+        return status
+
+    @staticmethod
+    def _normalize_quality_defect_list(value: Any) -> list[dict[str, str]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        defects: list[dict[str, str]] = []
+        for item in value:
+            defect = WorkflowAgent._normalize_quality_defect(item)
+            if defect["description"]:
+                defects.append(defect)
+        return defects
+
+    @staticmethod
+    def _normalize_quality_defect(value: Any) -> dict[str, str]:
+        parsed = WorkflowAgent._parse_quality_defect_mapping(value)
+        description = WorkflowAgent._stringify_value(parsed.get("description", "")).strip()
+        if not description:
+            description = WorkflowAgent._stringify_value(value).strip()
+        return {
+            "id": WorkflowAgent._stringify_value(parsed.get("id", "")).strip(),
+            "description": description,
+            "severity": WorkflowAgent._normalize_quality_severity(parsed.get("severity")),
+            "location": WorkflowAgent._stringify_value(parsed.get("location", "")).strip(),
+            "suggestion": WorkflowAgent._stringify_value(parsed.get("suggestion", "")).strip(),
+        }
+
+    @staticmethod
+    def _parse_quality_defect_mapping(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            return {}
+        text = value.strip()
+        if not text:
+            return {}
+        parsed: dict[str, str] = {}
+        for chunk in text.split("|"):
+            key, separator, raw_item = chunk.partition(":")
+            if not separator:
+                continue
+            normalized_key = key.strip().lower().replace(" ", "_")
+            item = raw_item.strip()
+            if normalized_key and item:
+                parsed[normalized_key] = item
+        return parsed
+
+    @staticmethod
+    def _normalize_quality_severity(value: Any) -> str:
+        normalized = WorkflowAgent._stringify_value(value).strip().lower()
+        if normalized in {"high", "critical", "major", "severe", "blocker"}:
+            return "high"
+        if normalized in {"low", "minor", "trivial"}:
+            return "low"
+        return "medium"
 
     @staticmethod
     def _stringify_value(value: Any) -> str:

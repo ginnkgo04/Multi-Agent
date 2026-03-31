@@ -45,7 +45,7 @@ class WorkflowGraphBuilder:
             select(NodeExecutionRecord).where(NodeExecutionRecord.cycle_id == cycle.id).order_by(NodeExecutionRecord.batch_index)
         ).all()
         if existing_nodes:
-            return existing_nodes, self._build_edges(existing_nodes, cycle.cycle_index)
+            return list(existing_nodes), self._build_edges(existing_nodes, cycle.cycle_index)
 
         role_order = role_order_for_cycle(cycle.cycle_index)
         role_dependencies = role_dependencies_for_cycle(cycle.cycle_index)
@@ -72,9 +72,9 @@ class WorkflowGraphBuilder:
         if cycle.status == CycleStatus.PENDING.value:
             cycle.status = CycleStatus.RUNNING.value
         session.commit()
-        nodes = session.scalars(
+        nodes = list(session.scalars(
             select(NodeExecutionRecord).where(NodeExecutionRecord.cycle_id == cycle.id).order_by(NodeExecutionRecord.batch_index)
-        ).all()
+        ).all())
         return nodes, self._build_edges(nodes, cycle.cycle_index)
 
     def graph_view(self, session: Session, run_id: str) -> GraphResponse:

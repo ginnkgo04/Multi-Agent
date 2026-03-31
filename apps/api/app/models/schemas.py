@@ -159,9 +159,23 @@ class GraphResponse(BaseModel):
     edges: list[WorkflowEdgeView]
 
 
+class QualityDefectSeverity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class QualityDefect(BaseModel):
+    id: str = ""
+    description: str = ""
+    severity: QualityDefectSeverity = QualityDefectSeverity.MEDIUM
+    location: str = ""
+    suggestion: str = ""
+
+
 class QualityReport(BaseModel):
     status: str
-    defect_list: list[str] = Field(default_factory=list)
+    defect_list: list[QualityDefect] = Field(default_factory=list)
     root_cause_guess: str = ""
     retest_scope: list[str] = Field(default_factory=list)
     remediation_requirement: str = ""

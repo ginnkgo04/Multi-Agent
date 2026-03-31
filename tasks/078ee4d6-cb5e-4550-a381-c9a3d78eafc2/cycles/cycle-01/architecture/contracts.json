@@ -1,0 +1,22 @@
+[
+  {
+    "name": "User Authentication API",
+    "type": "contract",
+    "description": "JWT-based authentication endpoints for user registration, login, logout, and token refresh"
+  },
+  {
+    "name": "Forum Data API",
+    "type": "contract",
+    "description": "RESTful endpoints for categories, threads, posts, votes, and search operations with pagination"
+  },
+  {
+    "name": "WebSocket Notification Interface",
+    "type": "contract",
+    "description": "Real-time bidirectional communication for notifications and live updates"
+  },
+  {
+    "name": "Frontend Component Interface",
+    "type": "contract",
+    "description": "React component contracts with TypeScript interfaces for props and state management"
+  }
+]
