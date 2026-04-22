@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -300,6 +300,44 @@ class ProjectTemplateProfileRead(BaseModel):
     project_id: str
     latest: MemorySummaryRead | None = None
     versions: list[MemorySummaryRead] = Field(default_factory=list)
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approved: bool
+    comment: str = ""
+
+
+class ClarificationContextRead(BaseModel):
+    requirement_brief: str = ""
+    clarifying_questions: list[str] = Field(default_factory=list)
+    assumed_defaults: list[str] = Field(default_factory=list)
+    acceptance_criteria: dict[str, Any] = Field(default_factory=dict)
+    work_breakdown: list[str] = Field(default_factory=list)
+    clarification_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClarificationRequest(BaseModel):
+    decision: Literal["accept_defaults", "reject_defaults"]
+    message: str = ""
+    structured_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class PendingActionRead(BaseModel):
+    run_id: str
+    status: RunStatus
+    action_type: str
+    target_role: str | None = None
+    reason: str = ""
+    latest_plan_id: str | None = None
+    approval_state: str | None = None
+    clarification_context: ClarificationContextRead | None = None
+
+
+class QualityGateRead(BaseModel):
+    run_id: str
+    cycle_id: str
+    cycle_index: int
+    report: QualityReport | None = None
 
 
 class AgentTaskResult(BaseModel):

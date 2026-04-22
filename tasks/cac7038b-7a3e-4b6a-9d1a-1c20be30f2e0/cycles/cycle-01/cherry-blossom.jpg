@@ -1,1 +1,0 @@
-This is a placeholder for the cherry-blossom.jpg image file. In a real implementation, replace this with an actual JPEG image of cherry blossoms. The image should be approximately 600x400 pixels, optimized for web, and depict pink cherry blossoms on a tree branch. For now, the HTML includes a fallback SVG placeholder if this file is missing.
