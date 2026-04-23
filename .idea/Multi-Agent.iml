@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/apps/web/app/runs" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
     </content>
-    <orderEntry type="jdk" jdkName="Multi-Agent" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="multi-agent" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

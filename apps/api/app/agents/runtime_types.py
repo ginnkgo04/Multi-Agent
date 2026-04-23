@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 
+from app.models.schemas import EditOperation
+
 
 def _merge_mappings(left: dict[str, Any] | None, right: dict[str, Any] | None) -> dict[str, Any]:
     if right == {}:
@@ -24,6 +26,8 @@ class WorkflowState(TypedDict, total=False):
     provider_name: str
     embedding_provider_name: str
     shared_plan_id: str | None
+    active_plan_id: str | None
+    plan_kind: str
     manual_approval: bool
     template_context: dict[str, Any]
     template_context_origin: str
@@ -33,11 +37,18 @@ class WorkflowState(TypedDict, total=False):
     next_action: str
     retry_counts: Annotated[dict[str, int], _merge_mappings]
     blocked_reason: str | None
+    approval_required: bool
+    approval_state: str
+    clarification_target_role: str | None
+    clarification_accepted_target_role: str | None
+    clarification_history: list[dict[str, Any]]
+    requirement_baseline: str
 
 
 @dataclass(slots=True)
 class ExecutionBuffer:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    edit_operations: list[dict[str, Any]] = field(default_factory=list)
     result_payload: dict[str, Any] = field(default_factory=dict)
     handoff_notes: str = ""
     confidence: float = 0.72
@@ -65,6 +76,9 @@ class ExecutionBuffer:
                 "metadata": metadata or {},
             }
         )
+
+    def emit_edit_operation(self, operation: EditOperation) -> None:
+        self.edit_operations.append(operation.model_dump(mode="python"))
 
     def submit(
         self,

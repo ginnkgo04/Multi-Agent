@@ -25,3 +25,14 @@ coverage/
 apps/api/.pytest_cache/
 data/
 runs/
+apps/api/tasks/
+apps/api/data/
+
+
+docs/
+notes/
+
+resume.md
+PLAN_FINAL.md
+
+

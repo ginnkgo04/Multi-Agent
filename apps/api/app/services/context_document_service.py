@@ -97,6 +97,8 @@ class ContextDocumentService:
                 "version_index": record.version_index,
                 "produced_by_role": record.produced_by_role,
                 "is_current": record.is_current,
+                "plan_kind": record.plan_kind,
+                "approval_state": record.approval_state,
             },
             embedding_provider=embedding_provider,
         )
@@ -188,6 +190,9 @@ class ContextDocumentService:
         produced_by_role: str,
         plan_payload: dict[str, Any],
         summary: str,
+        plan_kind: str = "initial",
+        approval_state: str = "pending",
+        parent_plan_id: str | None = None,
     ) -> SharedPlanRecord:
         all_records = session.scalars(select(SharedPlanRecord).where(SharedPlanRecord.run_id == run_id)).all()
         current_records = [
@@ -203,6 +208,9 @@ class ContextDocumentService:
             cycle_id=cycle_id,
             version_index=version_index,
             produced_by_role=produced_by_role,
+            plan_kind=plan_kind,
+            approval_state=approval_state,
+            parent_plan_id=parent_plan_id,
             plan_payload=plan_payload,
             summary=summary,
             is_current=True,
@@ -307,7 +315,11 @@ class ContextDocumentService:
     def _shared_plan_text(record: SharedPlanRecord) -> str:
         payload = record.plan_payload or {}
         summary = record.summary or ""
-        return f"{summary}\n{json.dumps(payload, ensure_ascii=False)}"
+        return (
+            f"Plan kind: {record.plan_kind}\n"
+            f"Approval state: {record.approval_state}\n"
+            f"{summary}\n{json.dumps(payload, ensure_ascii=False)}"
+        )
 
     @staticmethod
     def _project_id_for_run(session: Session, run_id: str) -> str:

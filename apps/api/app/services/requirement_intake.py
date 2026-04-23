@@ -112,11 +112,13 @@ class RequirementIntakeService:
             "## Layout\n\n"
             "- `input/`: original requirement and run request metadata\n"
             "- `logs/runtime.log`: append-only runtime event log for this run\n"
-            "- `cycles/cycle-xx/requirements`: PC outputs\n"
-            "- `cycles/cycle-xx/architecture`: CA outputs\n"
-            "- `cycles/cycle-xx/workspace/frontend`: FD generated frontend code\n"
-            "- `cycles/cycle-xx/workspace/backend`: BD generated backend code\n"
-            "- `cycles/cycle-xx/delivery`: DE delivery bundle\n"
-            "- `cycles/cycle-xx/quality`: QT reports and remediation notes\n",
+            "- `workspace/frontend`: live frontend code for the entire run\n"
+            "- `workspace/backend`: live backend code for the entire run\n"
+            "- `delivery/`: final delivery bundle for the run\n"
+            "- `cycles/cycle-xx/requirements`: PC outputs for one cycle\n"
+            "- `cycles/cycle-xx/architecture`: CA outputs for one cycle\n"
+            "- `cycles/cycle-xx/implementation/frontend`: FD notes for one cycle\n"
+            "- `cycles/cycle-xx/implementation/backend`: BD notes for one cycle\n"
+            "- `cycles/cycle-xx/quality`: QT reports and remediation notes for one cycle\n",
             encoding="utf-8",
         )

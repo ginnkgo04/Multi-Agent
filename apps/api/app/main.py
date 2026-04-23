@@ -25,7 +25,7 @@ app.include_router(router, prefix=settings.api_prefix)
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     init_db()
     with SessionLocal() as session:
         container.memory_service.backfill_project_ids(session)
@@ -40,6 +40,7 @@ def on_startup() -> None:
                     description="Default workspace for real multi-agent implementation runs.",
                 ),
             )
+    await container.runtime.recover_inflight_runs()
 
 
 @app.on_event("shutdown")

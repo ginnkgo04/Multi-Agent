@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.models.schemas import (
     AgentTaskContext,
     AgentTaskResult,
+    EditOperation,
     Role,
 )
 from app.services.workflow_graph_builder import role_dependencies_for_cycle
@@ -46,8 +47,15 @@ class LangChainLCELAgent:
         del fallback_provider, session, embedding_model, rag_service, tool_logger
         raw_text = await self._invoke_model(context, chat_model)
         payload = self.legacy._parse_model_response(str(raw_text))
-        summary = payload.get("summary") or f"{self.role.value} produced structured planning output."
-        handoff_notes = payload.get("handoff_notes") or f"Proceed to the next role after reviewing the {self.role.value} outputs."
+        summary = self.legacy._normalize_prompt_text(
+            payload.get("summary") or f"{self.role.value} produced structured planning output.",
+            limit=400,
+        )
+        handoff_notes = self.legacy._normalize_prompt_text(
+            payload.get("handoff_notes")
+            or f"Proceed to the next role after reviewing the {self.role.value} outputs.",
+            limit=800,
+        )
         confidence = float(payload.get("confidence", 0.72))
         result_payload = self.legacy._normalize_result_payload(payload)
         artifacts = self._build_artifacts(context, result_payload)
@@ -73,6 +81,7 @@ class LangChainLCELAgent:
                     "temperature": 0.1,
                     "max_tokens": 3500,
                     "timeout": 180,
+                    "response_format": {"type": "json_object"},
                 },
             )
 
@@ -106,12 +115,26 @@ class LangChainLCELAgent:
             return dedent(
                 f"""
                 You are the {spec['title']} in a LangChain-driven multi-agent delivery workflow.
-                Produce structured requirement analysis only.
+                Produce structured intent analysis and requirement normalization only.
                 Return ONLY one JSON object. Do not use markdown fences and do not add commentary.
                 Required keys:
+                - intent: object with
+                  - scope: frontend | backend | fullstack
+                  - app_type: short web-application category such as landing_page, dashboard, admin, forum, ecommerce, tool
+                  - confidence: float between 0 and 1
+                  - needs_clarification: boolean
+                  - clarifying_questions: array of unresolved questions
+                  - key_entities: array of important domain entities or features
+                  - constraints: array of important delivery constraints
                 - requirement_brief: concise but implementation-ready summary
                 - acceptance_criteria: object with must_have, should_have, could_have arrays
                 - work_breakdown: ordered array of execution tasks
+                - requirement_fidelity: object with
+                  - semantic_coverage_score: float between 0 and 1
+                  - constraint_retention_score: float between 0 and 1
+                  - unmapped_items: array of requirement details not yet grounded
+                  - assumed_defaults: array of defaults inferred by PC
+                  - clarification_needed: boolean
                 - summary: short stage summary
                 - handoff_notes: concise next-step notes
                 - confidence: float between 0 and 1
@@ -126,19 +149,29 @@ class LangChainLCELAgent:
             - shared_plan: structured implementation plan object
               - shared_plan.execution_contract.frontend.stack_id
               - shared_plan.execution_contract.frontend.required_paths
+              - shared_plan.execution_contract.frontend.allowed_paths
               - shared_plan.execution_contract.frontend.constraints
               - shared_plan.execution_contract.backend.stack_id
               - shared_plan.execution_contract.backend.required_paths
+              - shared_plan.execution_contract.backend.allowed_paths
               - shared_plan.execution_contract.backend.constraints
             - interfaces: array of contracts or APIs
             - architecture_decisions: array of key technical decisions
+            - remediation_plan: object describing incremental fixes when CA is responding to QT failures
+            - approval_status: pending | approved | rejected | not_required
             - summary: short stage summary
             - handoff_notes: concise next-step notes
             - confidence: float between 0 and 1
             Execution contract path rules:
-            - shared_plan.execution_contract.frontend.required_paths may only contain paths under workspace/frontend/ or implementation/frontend/
-            - shared_plan.execution_contract.backend.required_paths may only contain paths under workspace/backend/ or implementation/backend/
+            - shared_plan.execution_contract.frontend.required_paths must include at least one path under workspace/frontend/
+            - shared_plan.execution_contract.backend.required_paths must include at least one path under workspace/backend/
+            - implementation/frontend/notes.md is the only allowed implementation/ path in shared_plan.execution_contract.frontend.required_paths
+            - implementation/backend/notes.md is the only allowed implementation/ path in shared_plan.execution_contract.backend.required_paths
             - Never emit repo-root paths like index.html, styles.css, app.py, or README.md in execution_contract.required_paths
+            - required_paths must be the complete minimal runnable file set for the chosen stack, not only business source files
+            - Include package or dependency manifests, configuration, bootstrap, routing, entry, and service files needed to install, build, and start locally
+            - Do not omit framework entrypoints or runtime configuration files because they look like boilerplate
+            - Put install/build/start commands and port assumptions in constraints when they are known
             """
         ).strip()
 
@@ -147,14 +180,21 @@ class LangChainLCELAgent:
 
     def _build_artifacts(self, context: AgentTaskContext, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if self.role is Role.PC:
+            intent = payload.get("intent", {})
             acceptance = payload.get("acceptance_criteria", {})
-            work_breakdown = payload.get("work_breakdown", [])
             return [
+                self._artifact(
+                    context,
+                    path="requirements/intent_spec.json",
+                    summary="Intent specification",
+                    content=_json_blob(intent),
+                    content_type="application/json",
+                ),
                 self._artifact(
                     context,
                     path="requirements/brief.md",
                     summary="Requirement brief",
-                    content="# Requirement Brief\n\n" + payload.get("requirement_brief", "").strip() + "\n",
+                    content=self._pc_brief_content(payload),
                 ),
                 self._artifact(
                     context,
@@ -165,12 +205,68 @@ class LangChainLCELAgent:
                 ),
                 self._artifact(
                     context,
-                    path="requirements/work_breakdown.md",
-                    summary="Work breakdown",
-                    content="# Work Breakdown\n\n" + "\n".join(f"- {item}" for item in work_breakdown),
+                    path="requirements/requirement_diff_report.json",
+                    summary="Requirement fidelity and diff report",
+                    content=_json_blob(payload.get("requirement_fidelity", {})),
+                    content_type="application/json",
                 ),
             ]
 
+        shared_plan = payload.get("shared_plan", {})
+        execution_contract = shared_plan.get("execution_contract", {}) if isinstance(shared_plan, dict) else {}
+        return [
+            self._artifact(
+                context,
+                path="architecture/shared_plan.json",
+                summary="Shared implementation plan",
+                content=_json_blob(shared_plan),
+                content_type="application/json",
+            ),
+            self._artifact(
+                context,
+                path="architecture/execution_contract.json",
+                summary="Execution contract",
+                content=_json_blob(execution_contract),
+                content_type="application/json",
+            ),
+            self._artifact(
+                context,
+                path="architecture/interface_contracts.json",
+                summary="Interfaces and contracts",
+                content=_json_blob(payload.get("interfaces", [])),
+                content_type="application/json",
+            ),
+            self._artifact(
+                context,
+                path="architecture/approval_packet.md",
+                summary="Approval packet",
+                content=self._ca_approval_packet_content(context, payload),
+            ),
+        ]
+
+    def _pc_brief_content(self, payload: dict[str, Any]) -> str:
+        brief = payload.get("requirement_brief", "").strip()
+        intent = payload.get("intent", {}) if isinstance(payload.get("intent", {}), dict) else {}
+        lines = ["# Requirement Brief", ""]
+        if brief:
+            lines.extend([brief, ""])
+        if intent:
+            lines.extend(
+                [
+                    "## Intent",
+                    "",
+                    f"- Scope: {intent.get('scope', '') or 'unspecified'}",
+                    f"- App type: {intent.get('app_type', '') or 'unspecified'}",
+                    f"- Confidence: {intent.get('confidence', 0.0)}",
+                    f"- Needs clarification: {'yes' if intent.get('needs_clarification') else 'no'}",
+                ]
+            )
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _ca_approval_packet_content(self, context: AgentTaskContext, payload: dict[str, Any]) -> str:
+        approval_status = str(payload.get("approval_status", "pending")).strip() or "pending"
+        decisions = payload.get("architecture_decisions", [])
+        remediation_plan = payload.get("remediation_plan", {})
         task_graph = {
             "cycle_index": context.cycle_index,
             "roles": [role.value for role in role_dependencies_for_cycle(context.cycle_index).keys()],
@@ -179,32 +275,27 @@ class LangChainLCELAgent:
                 for role, dependencies in role_dependencies_for_cycle(context.cycle_index).items()
             },
         }
-        solution_lines = ["# Solution Outline", "", "## Shared Plan", _json_blob(payload.get("shared_plan", {}))]
-        decisions = payload.get("architecture_decisions", [])
-        if decisions:
-            solution_lines.extend(["", "## Key Decisions", *[f"- {item}" for item in decisions]])
-        return [
-            self._artifact(
-                context,
-                path="architecture/solution.md",
-                summary="Architecture solution document",
-                content="\n".join(solution_lines).strip() + "\n",
-            ),
-            self._artifact(
-                context,
-                path="architecture/contracts.json",
-                summary="Interfaces and contracts",
-                content=_json_blob(payload.get("interfaces", [])),
-                content_type="application/json",
-            ),
-            self._artifact(
-                context,
-                path="architecture/task_graph.json",
-                summary="Execution task graph",
-                content=_json_blob(task_graph),
-                content_type="application/json",
-            ),
+        lines = [
+            "# Approval Packet",
+            "",
+            f"- Approval status: {approval_status}",
+            f"- Cycle index: {context.cycle_index}",
+            "",
+            "## Architecture Decisions",
         ]
+        if decisions:
+            lines.extend(f"- {item}" for item in decisions)
+        else:
+            lines.append("- none")
+        lines.extend([
+            "",
+            "## Remediation Plan",
+            _json_blob(remediation_plan),
+            "",
+            "## Task Graph",
+            _json_blob(task_graph),
+        ])
+        return "\n".join(lines).rstrip() + "\n"
 
     def _artifact(
         self,
@@ -314,6 +405,60 @@ class LangChainToolAgent:
             return _json_blob(items)
 
         @tool
+        async def list_workspace_files() -> str:
+            """Return the current run workspace manifest for the active role."""
+            await log_tool("list_workspace_files", "ok", {"count": len(context.workspace_manifest)})
+            return _json_blob(context.workspace_manifest)
+
+        @tool
+        async def read_workspace_file(path: str) -> str:
+            """Return the current contents of one workspace file from the assembled baseline."""
+            normalized_path = self.legacy._normalize_relative_path(path)
+            snapshot = next((item for item in context.workspace_snapshots if item.path == normalized_path), None)
+            if snapshot is None:
+                raise ValueError(f"Workspace file not available in context: {path}")
+            await log_tool("read_workspace_file", "ok", {"path": normalized_path, "size_bytes": snapshot.size_bytes})
+            return snapshot.content
+
+        @tool
+        async def emit_edit_operation(
+            path: str,
+            operation: str,
+            strategy: str,
+            summary: str,
+            content: str = "",
+            old_text: str = "",
+            new_text: str = "",
+            anchors: list[str] | None = None,
+            unified_diff: str = "",
+        ) -> str:
+            """Buffer one workspace edit operation for the current role."""
+            edit_operation = self.legacy._normalize_edit_operation(
+                EditOperation(
+                    path=path,
+                    operation=operation,
+                    strategy=strategy,
+                    summary=summary,
+                    content=content,
+                    old_text=old_text,
+                    new_text=new_text,
+                    anchors=anchors or [],
+                    unified_diff=unified_diff,
+                )
+            )
+            buffer.emit_edit_operation(edit_operation)
+            await log_tool(
+                "emit_edit_operation",
+                "ok",
+                {
+                    "path": edit_operation.path,
+                    "operation": edit_operation.operation,
+                    "strategy": edit_operation.strategy,
+                },
+            )
+            return f"Buffered edit operation for {edit_operation.path}"
+
+        @tool
         async def emit_artifact(path: str, artifact_type: str, content_type: str, summary: str, content: str) -> str:
             """Buffer an artifact that belongs to the current role."""
             normalized_path = self.legacy._normalize_relative_path(path)
@@ -347,7 +492,11 @@ class LangChainToolAgent:
                 result_payload=normalized_payload,
                 confidence=normalized_confidence,
             )
-            await log_tool("submit_result", "ok", {"artifact_count": len(buffer.artifacts)})
+            await log_tool(
+                "submit_result",
+                "ok",
+                {"artifact_count": len(buffer.artifacts), "edit_operation_count": len(buffer.edit_operations)},
+            )
             return "Result submitted"
 
         tools = [
@@ -356,6 +505,9 @@ class LangChainToolAgent:
             list_upstream_artifacts,
             retrieve_context,
             get_context_sources,
+            list_workspace_files,
+            read_workspace_file,
+            emit_edit_operation,
             emit_artifact,
             submit_result,
         ]
@@ -365,11 +517,13 @@ class LangChainToolAgent:
             if not buffer.submitted:
                 raise ValueError(f"{self.role.value} must call submit_result before finishing.")
 
-            self.legacy._validate_artifacts(context, buffer.artifacts)
+            edit_operations = [self.legacy._normalize_edit_operation(item) for item in buffer.edit_operations]
+            self.legacy._validate_artifacts(context, buffer.artifacts, edit_operations=edit_operations)
             result_payload = self.legacy._normalize_result_payload(buffer.result_payload)
             return AgentTaskResult(
                 summary=buffer.summary,
                 artifact_list=buffer.artifacts,
+                edit_operations=edit_operations,
                 result_payload=result_payload,
                 confidence=buffer.confidence,
                 handoff_notes=buffer.handoff_notes,
@@ -424,6 +578,8 @@ class LangChainToolAgent:
 
             Rules:
             - Always use emit_artifact for every output file.
+            - When modifying workspace code for FD or BD, use emit_edit_operation for create, update, and delete actions under workspace/*.
+            - Use list_workspace_files and read_workspace_file before editing existing workspace files.
             - Always call submit_result exactly once after artifact emission is complete.
             - Produce real implementation content, not pseudo-code.
             - Keep all tool arguments plain strings or JSON-compatible objects.
@@ -437,6 +593,15 @@ class LangChainToolAgent:
         execution_guidance = self.legacy._execution_guidance_block(context)
         if execution_guidance:
             prompt = f"{prompt}\n{execution_guidance}"
+        if self.role in {Role.FD, Role.BD}:
+            prompt = (
+                f"{prompt}\n"
+                "Workspace edit guardrails:\n"
+                "- Use emit_edit_operation for workspace changes and emit_artifact for implementation notes.\n"
+                "- Prefer replace, insert_before, insert_after, or patch for existing files.\n"
+                "- Delete obsolete files explicitly.\n"
+                "- Do not overwrite an existing workspace file with a full rewritten file body.\n"
+            )
         return prompt
 
     def _human_prompt(self, context: AgentTaskContext) -> str:

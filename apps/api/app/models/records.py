@@ -156,9 +156,52 @@ class SharedPlanRecord(Base):
     cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
     version_index: Mapped[int] = mapped_column(Integer, nullable=False)
     produced_by_role: Mapped[str] = mapped_column(String(8), nullable=False)
+    plan_kind: Mapped[str] = mapped_column(String(32), default="initial")
+    approval_state: Mapped[str] = mapped_column(String(32), default="pending")
+    parent_plan_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     plan_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     summary: Mapped[str] = mapped_column(Text, default="")
     is_current: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApprovalRecord(Base):
+    __tablename__ = "approvals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    shared_plan_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved: Mapped[bool] = mapped_column(default=False)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    reviewer: Mapped[str] = mapped_column(String(128), default="local-user")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ClarificationRecord(Base):
+    __tablename__ = "clarifications"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_role: Mapped[str] = mapped_column(String(8), nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="")
+    structured_context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserPreferenceRecord(Base):
+    __tablename__ = "user_preferences"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    preference_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(32), default="explicit")
+    confidence: Mapped[int] = mapped_column(Integer, default=100)
+    applies_to: Mapped[str] = mapped_column(String(32), default="global")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    last_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

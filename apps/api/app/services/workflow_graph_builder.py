@@ -9,22 +9,22 @@ from app.models.records import CycleRecord, NodeExecutionRecord
 from app.models.schemas import CycleStatus, GraphResponse, NodeStatus, Role, WorkflowEdgeView, WorkflowNodeView
 from app.services.batch_scheduler import BatchScheduler
 
-INITIAL_ROLE_ORDER = [Role.PC, Role.CA, Role.FD, Role.BD, Role.DE, Role.QT]
+INITIAL_ROLE_ORDER = [Role.PC, Role.CA, Role.FD, Role.BD, Role.QT, Role.DE]
 INITIAL_ROLE_DEPENDENCIES: dict[Role, list[Role]] = {
     Role.PC: [],
     Role.CA: [Role.PC],
     Role.FD: [Role.CA],
     Role.BD: [Role.CA],
-    Role.DE: [Role.FD, Role.BD],
-    Role.QT: [Role.DE],
+    Role.QT: [Role.FD, Role.BD],
+    Role.DE: [Role.QT],
 }
-REMEDIATION_ROLE_ORDER = [Role.CA, Role.FD, Role.BD, Role.DE, Role.QT]
+REMEDIATION_ROLE_ORDER = [Role.CA, Role.FD, Role.BD, Role.QT, Role.DE]
 REMEDIATION_ROLE_DEPENDENCIES: dict[Role, list[Role]] = {
     Role.CA: [],
     Role.FD: [Role.CA],
     Role.BD: [Role.CA],
-    Role.DE: [Role.FD, Role.BD],
-    Role.QT: [Role.DE],
+    Role.QT: [Role.FD, Role.BD],
+    Role.DE: [Role.QT],
 }
 
 

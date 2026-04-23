@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.records import ArtifactRecord
-from app.models.schemas import ArtifactManifest
+from app.models.schemas import ArtifactManifest, EditOperation
 
 
 class ArtifactStore:
+    RUN_ROOT_PREFIXES = ("workspace/frontend/", "workspace/backend/", "delivery/")
+
     def __init__(self) -> None:
         self.settings = get_settings()
 
@@ -37,11 +39,10 @@ class ArtifactStore:
         role: str,
         artifacts: list[dict[str, Any]],
     ) -> list[ArtifactManifest]:
-        cycle_dir = self.cycle_root(run_id, cycle_index)
         manifests: list[ArtifactManifest] = []
         for artifact in artifacts:
             relative_path = self._safe_relative_path(artifact["name"])
-            file_path = cycle_dir / relative_path
+            file_path = self.resolve_output_path(run_id, cycle_index, relative_path.as_posix())
             file_path.parent.mkdir(parents=True, exist_ok=True)
             content = self._serialize_content(artifact.get("content", ""))
             file_path.write_text(content, encoding="utf-8")
@@ -60,6 +61,87 @@ class ArtifactStore:
                     "content_preview": preview,
                     "relative_path": relative_path.as_posix(),
                     "role": role,
+                    "path_class": self._path_class(relative_path),
+                },
+            )
+            session.add(record)
+            session.flush()
+            manifests.append(self._to_manifest(record))
+        session.commit()
+        return manifests
+
+    def save_role_outputs(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        cycle_id: str,
+        cycle_index: int,
+        node_id: str,
+        role: str,
+        artifacts: list[dict[str, Any]],
+        edit_operations: list[EditOperation],
+    ) -> list[ArtifactManifest]:
+        saved_artifacts = self.save_artifacts(
+            session,
+            run_id=run_id,
+            cycle_id=cycle_id,
+            cycle_index=cycle_index,
+            node_id=node_id,
+            role=role,
+            artifacts=artifacts,
+        ) if artifacts else []
+        saved_edits = self.apply_edit_operations(
+            session,
+            run_id=run_id,
+            cycle_id=cycle_id,
+            cycle_index=cycle_index,
+            node_id=node_id,
+            role=role,
+            operations=edit_operations,
+        ) if edit_operations else []
+        return [*saved_artifacts, *saved_edits]
+
+    def resolve_output_path(self, run_id: str, cycle_index: int, relative_path: str) -> Path:
+        safe_path = self._safe_relative_path(relative_path)
+        if safe_path.as_posix().startswith(self.RUN_ROOT_PREFIXES):
+            return self.task_root(run_id) / safe_path
+        return self.cycle_root(run_id, cycle_index) / safe_path
+
+    def apply_edit_operations(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        cycle_id: str,
+        cycle_index: int,
+        node_id: str,
+        role: str,
+        operations: list[EditOperation],
+    ) -> list[ArtifactManifest]:
+        from app.services.workspace_editing import apply_edit_operation
+
+        manifests: list[ArtifactManifest] = []
+        for operation in operations:
+            relative_path = self._safe_relative_path(operation.path)
+            file_path = self.resolve_output_path(run_id, cycle_index, relative_path.as_posix())
+            action, preview = apply_edit_operation(file_path, operation)
+            record = ArtifactRecord(
+                run_id=run_id,
+                cycle_id=cycle_id,
+                node_id=node_id,
+                artifact_type="workspace-edit",
+                name=relative_path.as_posix(),
+                path=str(file_path),
+                content_type="text/plain",
+                summary=operation.summary,
+                artifact_metadata={
+                    "operation": action,
+                    "edit_strategy": operation.strategy,
+                    "relative_path": relative_path.as_posix(),
+                    "role": role,
+                    "path_class": self._path_class(relative_path),
+                    "content_preview": preview,
                 },
             )
             session.add(record)
@@ -98,6 +180,17 @@ class ArtifactStore:
         if isinstance(content, (dict, list)):
             return json.dumps(content, ensure_ascii=False, indent=2)
         return str(content)
+
+    @classmethod
+    def _path_class(cls, relative_path: Path) -> str:
+        normalized = relative_path.as_posix()
+        if normalized.startswith("workspace/frontend/"):
+            return "workspace_frontend"
+        if normalized.startswith("workspace/backend/"):
+            return "workspace_backend"
+        if normalized.startswith("delivery/"):
+            return "delivery"
+        return "cycle_artifact"
 
     @staticmethod
     def _safe_relative_path(raw_path: str) -> Path:

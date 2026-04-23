@@ -3,16 +3,24 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.records import ArtifactRecord, CycleRecord, MemorySummaryRecord, NodeExecutionRecord, RunRecord
-from app.models.schemas import AgentTaskContext, ArtifactManifest, ContextSource, ContextSourceType, ProviderConfig, Role
+from app.models.records import ArtifactRecord, ClarificationRecord, CycleRecord, MemorySummaryRecord, NodeExecutionRecord, RunRecord
+from app.models.schemas import AgentTaskContext, ArtifactManifest, ContextSource, ContextSourceType, ProviderConfig, Role, WorkspaceFileSnapshot
 from app.services.artifact_store import ArtifactStore
 from app.services.context_budgeter import ContextBudgeter
 from app.services.context_document_service import ContextDocumentService
 from app.services.memory_service import MemoryService
 from app.services.workflow_graph_builder import role_dependencies_for_cycle
+from app.agents.base import ROLE_ALLOWED_ROOTS
 
 
 class ContextAssembler:
+    WORKSPACE_ROOTS_BY_ROLE: dict[Role, tuple[str, ...]] = {
+        Role.FD: ("workspace/frontend",),
+        Role.BD: ("workspace/backend",),
+        Role.QT: ("workspace/frontend", "workspace/backend"),
+        Role.DE: ("workspace/frontend", "workspace/backend"),
+    }
+
     def __init__(
         self,
         artifact_store: ArtifactStore,
@@ -38,14 +46,22 @@ class ContextAssembler:
         upstream_artifacts = self._artifact_manifests(session, cycle, node)
         shared_plan_record = self.context_documents.get_current_shared_plan(session, run.id)
         project_profile = self.memory_service.get_current_project_template_profile(session, run.project_id)
-        retrieved_context = await self.context_documents.retrieve(
-            session,
-            run.project_id,
-            query=f"{run.requirement}\n{cycle.remediation_requirement or ''}\n{node.role}",
-            embedding_provider=embedding_provider,
-            run_id=run.id,
-            source_types=[ContextSourceType.KNOWLEDGE.value, ContextSourceType.ARTIFACT.value],
-        )
+        clarification_history = self._clarification_history(session, run.id)
+        preference_profile = self.memory_service.resolve_preference_context(session, run.project_id)
+        retrieval_error: str | None = None
+        try:
+            retrieved_context = await self.context_documents.retrieve(
+                session,
+                run.project_id,
+                query=f"{run.requirement}\n{cycle.remediation_requirement or ''}\n{node.role}",
+                embedding_provider=embedding_provider,
+                run_id=run.id,
+                source_types=[ContextSourceType.KNOWLEDGE.value, ContextSourceType.ARTIFACT.value],
+            )
+        except Exception as exc:
+            retrieved_context = []
+            error_message = str(exc).strip() or "<empty>"
+            retrieval_error = f"{exc.__class__.__name__}: {error_message}"
         cycle_summaries = self.memory_service.list_summaries(session, run.id, summary_type="cycle_summary")
         recent_memories = self.memory_service.list_recent_records(session, run.id)
 
@@ -53,6 +69,8 @@ class ContextAssembler:
             run=run,
             shared_plan_record=shared_plan_record,
             project_profile=project_profile,
+            clarification_history=clarification_history,
+            preference_profile=preference_profile,
             upstream_artifacts=upstream_artifacts,
             retrieved_context=retrieved_context,
             cycle_summaries=cycle_summaries,
@@ -63,6 +81,7 @@ class ContextAssembler:
         task_spec = dict(node.task_spec or {})
         shared_plan = dict(shared_plan_record.plan_payload or {}) if shared_plan_record else {}
         included_sources = [source for source in ordered_sources if source.included]
+        workspace_manifest, workspace_snapshots = self._workspace_baseline(run.id, Role(node.role))
         return AgentTaskContext(
             role=Role(node.role),
             project_id=run.project_id,
@@ -83,7 +102,17 @@ class ContextAssembler:
             context_metadata={
                 **budget_metadata,
                 "template_context_origin": run.template_context_origin,
+                **({"retrieval_error": retrieval_error} if retrieval_error else {}),
             },
+            active_plan_id=shared_plan_record.id if shared_plan_record else None,
+            plan_kind=shared_plan_record.plan_kind if shared_plan_record else ("initial" if cycle.cycle_index == 1 else "remediation"),
+            approval_state=shared_plan_record.approval_state if shared_plan_record else "not_required",
+            clarification_history=clarification_history,
+            requirement_baseline=run.requirement,
+            preference_profile=preference_profile,
+            allowed_write_roots=list(ROLE_ALLOWED_ROOTS.get(Role(node.role), ())),
+            workspace_manifest=workspace_manifest,
+            workspace_snapshots=workspace_snapshots,
         )
 
     def _build_context_sources(
@@ -92,6 +121,8 @@ class ContextAssembler:
         run: RunRecord,
         shared_plan_record,
         project_profile,
+        clarification_history: list[dict],
+        preference_profile: dict,
         upstream_artifacts: list[ArtifactManifest],
         retrieved_context: list[dict],
         cycle_summaries: list[MemorySummaryRecord],
@@ -109,6 +140,22 @@ class ContextAssembler:
                 order_index=0,
             )
         ]
+        for record in clarification_history:
+            sources.append(
+                ContextSource(
+                    source_type=ContextSourceType.CLARIFICATION,
+                    source_id=record["id"],
+                    path=f"runs/{run.id}/clarifications/{record['id']}",
+                    excerpt=record["message"],
+                    metadata={
+                        "scope": "run",
+                        "target_role": record["target_role"],
+                    },
+                    scope="run",
+                    section="clarification_history",
+                    order_index=len(sources),
+                )
+            )
         if shared_plan_record is not None:
             sources.append(
                 ContextSource(
@@ -122,6 +169,22 @@ class ContextAssembler:
                     },
                     scope="run",
                     section="shared_plan",
+                    order_index=len(sources),
+                )
+            )
+        if preference_profile:
+            sources.append(
+                ContextSource(
+                    source_type=ContextSourceType.PREFERENCE,
+                    source_id=run.project_id,
+                    path=f"projects/{run.project_id}/preferences",
+                    excerpt=str(preference_profile),
+                    metadata={
+                        "scope": "project",
+                        "preference_count": len(preference_profile),
+                    },
+                    scope="project",
+                    section="preference_profile",
                     order_index=len(sources),
                 )
             )
@@ -208,6 +271,24 @@ class ContextAssembler:
             )
         return sources
 
+    @staticmethod
+    def _clarification_history(session: Session, run_id: str, limit: int = 4) -> list[dict]:
+        records = list(session.scalars(
+            select(ClarificationRecord)
+            .where(ClarificationRecord.run_id == run_id)
+            .order_by(ClarificationRecord.created_at.desc())
+            .limit(limit)
+        ).all())
+        return [
+            {
+                "id": record.id,
+                "message": record.message,
+                "structured_context": record.structured_context or {},
+                "target_role": record.target_role,
+            }
+            for record in reversed(records)
+        ]
+
     def _artifact_manifests(self, session: Session, cycle: CycleRecord, node: NodeExecutionRecord) -> list[ArtifactManifest]:
         upstream_roles = role_dependencies_for_cycle(cycle.cycle_index)[Role(node.role)]
         upstream_nodes = session.scalars(
@@ -245,6 +326,32 @@ class ContextAssembler:
                 )
             )
         return manifests
+
+    def _workspace_baseline(self, run_id: str, role: Role) -> tuple[list[str], list[WorkspaceFileSnapshot]]:
+        roots = self.WORKSPACE_ROOTS_BY_ROLE.get(role, ())
+        if not roots:
+            return [], []
+
+        task_root = self.artifact_store.task_root(run_id)
+        manifest: list[str] = []
+        snapshots: list[WorkspaceFileSnapshot] = []
+        for root in roots:
+            absolute_root = task_root / root
+            if not absolute_root.exists():
+                continue
+            for file_path in sorted(path for path in absolute_root.rglob("*") if path.is_file()):
+                relative_path = file_path.relative_to(task_root).as_posix()
+                content = file_path.read_text(encoding="utf-8")
+                manifest.append(relative_path)
+                snapshots.append(
+                    WorkspaceFileSnapshot(
+                        path=relative_path,
+                        content=content,
+                        exists=True,
+                        size_bytes=len(content.encode("utf-8")),
+                    )
+                )
+        return manifest, snapshots
 
     @staticmethod
     def _included_retrieved_docs(sources: list[ContextSource]) -> list[dict]:

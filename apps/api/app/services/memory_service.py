@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.models.records import ArtifactRecord, CycleRecord, MemoryRecord, MemorySummaryRecord, ProjectRecord, RunRecord, SharedPlanRecord
+from app.models.records import ArtifactRecord, CycleRecord, MemoryRecord, MemorySummaryRecord, ProjectRecord, RunRecord, SharedPlanRecord, UserPreferenceRecord
 
 
 class MemoryService:
@@ -99,12 +100,72 @@ class MemoryService:
         normalized = dict(requested_template_context or {})
         if normalized:
             return normalized, "explicit", None
+        preference_context = self.resolve_preference_context(session, project_id)
         profile = self.get_current_project_template_profile(session, project_id)
         if profile:
             inherited = profile.summary_metadata.get("template_context")
             if isinstance(inherited, dict) and inherited:
-                return dict(inherited), "project_profile", profile
+                return {**dict(inherited), **preference_context}, "project_profile", profile
+        if preference_context:
+            return preference_context, "user_preference", profile
         return {}, "empty", profile
+
+    def list_active_preferences(self, session: Session, project_id: str) -> list[UserPreferenceRecord]:
+        return list(session.scalars(
+            select(UserPreferenceRecord)
+            .where(UserPreferenceRecord.project_id == project_id, UserPreferenceRecord.is_active == True)  # noqa: E712
+            .order_by(UserPreferenceRecord.created_at)
+        ).all())
+
+    def resolve_preference_context(self, session: Session, project_id: str) -> dict:
+        context: dict[str, str] = {}
+        for record in self.list_active_preferences(session, project_id):
+            context[record.preference_key] = record.value
+        return context
+
+    def upsert_user_preferences(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        preferences: dict | None,
+        source: str = "explicit",
+        applies_to: str = "global",
+    ) -> list[UserPreferenceRecord]:
+        if not isinstance(preferences, dict):
+            return []
+        records: list[UserPreferenceRecord] = []
+        for raw_key, raw_value in preferences.items():
+            key = str(raw_key).strip()
+            value = str(raw_value).strip()
+            if not key or not value:
+                continue
+            record = session.scalar(
+                select(UserPreferenceRecord).where(
+                    UserPreferenceRecord.project_id == project_id,
+                    UserPreferenceRecord.preference_key == key,
+                    UserPreferenceRecord.is_active == True,  # noqa: E712
+                )
+            )
+            if record is None:
+                record = UserPreferenceRecord(
+                    project_id=project_id,
+                    preference_key=key,
+                    value=value,
+                    source=source,
+                    applies_to=applies_to,
+                    confidence=100 if source == "explicit" else 80,
+                )
+                session.add(record)
+            else:
+                record.value = value
+                record.source = source
+                record.applies_to = applies_to
+                record.confidence = 100 if source == "explicit" else 80
+                record.last_confirmed_at = datetime.now(timezone.utc)
+            records.append(record)
+        session.commit()
+        return records
 
     def build_cycle_summary(
         self,

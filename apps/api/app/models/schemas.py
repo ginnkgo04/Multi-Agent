@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from pydantic import model_validator
 
 
 class Role(str, Enum):
@@ -29,6 +30,8 @@ class NodeStatus(str, Enum):
 class RunStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    WAITING_CLARIFICATION = "WAITING_CLARIFICATION"
     BLOCKED = "BLOCKED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -38,6 +41,8 @@ class RunStatus(str, Enum):
 class CycleStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    WAITING_CLARIFICATION = "WAITING_CLARIFICATION"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
@@ -62,6 +67,15 @@ class EventType(str, Enum):
     RUN_PAUSED = "run_paused"
     RUN_RESUMED = "run_resumed"
     RUN_COMPLETED = "run_completed"
+    PLAN_DRAFTED = "plan_drafted"
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_GRANTED = "approval_granted"
+    APPROVAL_REJECTED = "approval_rejected"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    CLARIFICATION_RECEIVED = "clarification_received"
+    QUALITY_GATE_PASSED = "quality_gate_passed"
+    QUALITY_GATE_FAILED = "quality_gate_failed"
+    DELIVERY_COMPLETED = "delivery_completed"
 
 
 class ProjectCreate(BaseModel):
@@ -102,6 +116,8 @@ class ContextSourceType(str, Enum):
     SHARED_PLAN = "shared_plan"
     MEMORY = "memory"
     REQUIREMENT = "requirement"
+    CLARIFICATION = "clarification"
+    PREFERENCE = "preference"
 
 
 class KnowledgeIngestRequest(BaseModel):
@@ -169,8 +185,13 @@ class QualityDefect(BaseModel):
     id: str = ""
     description: str = ""
     severity: QualityDefectSeverity = QualityDefectSeverity.MEDIUM
+    owner_role: str = ""
     location: str = ""
     suggestion: str = ""
+    expected_behavior: str = ""
+    actual_behavior: str = ""
+    fix_guidance: str = ""
+    requires_plan_update: bool = False
 
 
 class QualityReport(BaseModel):
@@ -179,6 +200,7 @@ class QualityReport(BaseModel):
     root_cause_guess: str = ""
     retest_scope: list[str] = Field(default_factory=list)
     remediation_requirement: str = ""
+    approval_recommended: bool = False
 
 
 class RemediationRequirement(BaseModel):
@@ -224,6 +246,7 @@ class RunRead(BaseModel):
 
 
 class RunDetail(RunRead):
+    latest_event_sequence: int = 0
     cycles: list[CycleSummary] = Field(default_factory=list)
     latest_artifacts: list[ArtifactManifest] = Field(default_factory=list)
 
@@ -239,6 +262,60 @@ class ContextSource(BaseModel):
     section: str | None = None
     order_index: int | None = None
     included: bool = True
+
+
+class WorkspaceFileSnapshot(BaseModel):
+    path: str
+    content: str = ""
+    exists: bool = True
+    size_bytes: int = 0
+
+
+class EditOperation(BaseModel):
+    path: str
+    operation: Literal["create", "update", "delete"]
+    strategy: Literal["create", "replace", "insert_before", "insert_after", "patch", "delete"]
+    summary: str = ""
+    content: str = ""
+    old_text: str = ""
+    new_text: str = ""
+    anchors: list[str] = Field(default_factory=list)
+    unified_diff: str = ""
+
+    @model_validator(mode="after")
+    def validate_operation_strategy(self) -> "EditOperation":
+        if self.operation == "create":
+            if self.strategy != "create":
+                raise ValueError("create operations require strategy='create'")
+            if not self.content:
+                raise ValueError("create operations require non-empty content")
+            return self
+
+        if self.operation == "delete":
+            if self.strategy != "delete":
+                raise ValueError("delete operations require strategy='delete'")
+            return self
+
+        allowed_update_strategies = {"replace", "insert_before", "insert_after", "patch"}
+        if self.strategy not in allowed_update_strategies:
+            raise ValueError("update operations require a valid update strategy")
+
+        if self.strategy == "replace" and (not self.old_text or not self.new_text):
+            raise ValueError("replace updates require both old_text and new_text")
+
+        if self.strategy == "patch" and not self.unified_diff:
+            raise ValueError("patch updates require unified_diff")
+
+        if self.strategy in {"insert_before", "insert_after"} and (
+            not self.anchors or not self.new_text
+        ):
+            raise ValueError("insert updates require at least one anchor and non-empty new_text")
+
+        return self
+
+
+class EditPlan(BaseModel):
+    operations: list[EditOperation] = Field(default_factory=list)
 
 
 class AgentTaskContext(BaseModel):
@@ -259,6 +336,15 @@ class AgentTaskContext(BaseModel):
     template_context_origin: str = "explicit"
     context_sources: list[ContextSource] = Field(default_factory=list)
     context_metadata: dict[str, Any] = Field(default_factory=dict)
+    active_plan_id: str | None = None
+    plan_kind: str = "initial"
+    approval_state: str = "not_required"
+    clarification_history: list[dict[str, Any]] = Field(default_factory=list)
+    requirement_baseline: str = ""
+    preference_profile: dict[str, Any] = Field(default_factory=dict)
+    allowed_write_roots: list[str] = Field(default_factory=list)
+    workspace_manifest: list[str] = Field(default_factory=list)
+    workspace_snapshots: list[WorkspaceFileSnapshot] = Field(default_factory=list)
 
 
 class SharedPlanVersionRead(BaseModel):
@@ -268,6 +354,9 @@ class SharedPlanVersionRead(BaseModel):
     produced_by_role: str
     summary: str
     is_current: bool
+    plan_kind: str = "initial"
+    approval_state: str = "pending"
+    parent_plan_id: str | None = None
     created_at: datetime
 
 
@@ -275,6 +364,7 @@ class SharedPlanRead(BaseModel):
     run_id: str
     latest_plan_id: str | None = None
     latest_plan: dict[str, Any] = Field(default_factory=dict)
+    latest_approval_state: str | None = None
     versions: list[SharedPlanVersionRead] = Field(default_factory=list)
 
 
@@ -322,6 +412,16 @@ class ClarificationRequest(BaseModel):
     structured_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class ApprovalContextRead(BaseModel):
+    summary: str = ""
+    plan_kind: str = "initial"
+    approval_state: str = "pending"
+    execution_contract: dict[str, Any] = Field(default_factory=dict)
+    interfaces: list[dict[str, Any]] = Field(default_factory=list)
+    architecture_decisions: list[str] = Field(default_factory=list)
+    remediation_plan: dict[str, Any] = Field(default_factory=dict)
+
+
 class PendingActionRead(BaseModel):
     run_id: str
     status: RunStatus
@@ -330,6 +430,7 @@ class PendingActionRead(BaseModel):
     reason: str = ""
     latest_plan_id: str | None = None
     approval_state: str | None = None
+    approval_context: ApprovalContextRead | None = None
     clarification_context: ClarificationContextRead | None = None
 
 
@@ -346,12 +447,33 @@ class AgentTaskResult(BaseModel):
     result_payload: dict[str, Any] = Field(default_factory=dict)
     confidence: float = 0.5
     handoff_notes: str = ""
+    edit_operations: list[EditOperation] = Field(default_factory=list)
+
+
+class IntentLayerSchema(BaseModel):
+    scope: str = ""
+    app_type: str = ""
+    confidence: float = 0.0
+    needs_clarification: bool = False
+    clarifying_questions: list[str] = Field(default_factory=list)
+    key_entities: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+
+
+class RequirementFidelitySchema(BaseModel):
+    semantic_coverage_score: float = 0.0
+    constraint_retention_score: float = 0.0
+    unmapped_items: list[str] = Field(default_factory=list)
+    assumed_defaults: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
 
 
 class PCResultSchema(BaseModel):
+    intent: IntentLayerSchema = Field(default_factory=IntentLayerSchema)
     requirement_brief: str
     acceptance_criteria: dict[str, Any] = Field(default_factory=dict)
     work_breakdown: list[str] = Field(default_factory=list)
+    requirement_fidelity: RequirementFidelitySchema = Field(default_factory=RequirementFidelitySchema)
     summary: str = ""
     handoff_notes: str = ""
     confidence: float = 0.72
@@ -361,6 +483,8 @@ class CAResultSchema(BaseModel):
     shared_plan: dict[str, Any] = Field(default_factory=dict)
     interfaces: list[dict[str, Any]] = Field(default_factory=list)
     architecture_decisions: list[str] = Field(default_factory=list)
+    remediation_plan: dict[str, Any] = Field(default_factory=dict)
+    approval_status: str = "pending"
     summary: str = ""
     handoff_notes: str = ""
     confidence: float = 0.72

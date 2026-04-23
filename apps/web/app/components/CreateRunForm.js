@@ -69,7 +69,7 @@ export default function CreateRunForm({ projects }) {
           {pending ? 'Launching...' : 'Start Run'}
         </button>
       </div>
-      <div className="subtle">Each run creates a real task workspace under `tasks/&lt;run_id&gt;/cycles/` with generated frontend, backend, delivery, and quality files.</div>
+      <div className="subtle">Each run creates a real task workspace under `tasks/&lt;run_id&gt;/cycles/` with generated frontend, backend, quality, and post-QT delivery files.</div>
       {error ? <div className="notice">{error}</div> : null}
       {!projects.length ? <div className="notice">Create a project first so the orchestrator has a workspace.</div> : null}
     </form>

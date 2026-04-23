@@ -67,8 +67,11 @@ class EventBus:
             if queue in self._subscribers[run_id]:
                 self._subscribers[run_id].remove(queue)
 
-    def replay(self, session: Session, run_id: str) -> list[EventMessage]:
-        records = session.scalars(select(EventRecord).where(EventRecord.run_id == run_id).order_by(EventRecord.sequence)).all()
+    def replay(self, session: Session, run_id: str, after_sequence: int | None = None) -> list[EventMessage]:
+        stmt = select(EventRecord).where(EventRecord.run_id == run_id)
+        if after_sequence is not None:
+            stmt = stmt.where(EventRecord.sequence > after_sequence)
+        records = session.scalars(stmt.order_by(EventRecord.sequence)).all()
         return [
             EventMessage(
                 sequence=record.sequence,

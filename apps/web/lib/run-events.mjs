@@ -1,6 +1,6 @@
 import { API_BASE } from './api.js';
 
-const RUN_EVENT_REFRESH_TYPES = new Set([
+const RUN_EVENT_REFRESH_TYPES = Object.freeze([
   'cycle_started',
   'node_started',
   'node_completed',
@@ -17,14 +17,21 @@ const RUN_EVENT_REFRESH_TYPES = new Set([
   'delivery_completed',
 ]);
 
+const RUN_EVENT_REFRESH_TYPE_SET = new Set(RUN_EVENT_REFRESH_TYPES);
+
 function shouldRefreshForRunEvent(type) {
-  return RUN_EVENT_REFRESH_TYPES.has(type);
+  return RUN_EVENT_REFRESH_TYPE_SET.has(type);
 }
 
 function parseRunEventMessage(raw) {
   try {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.type !== 'string' || typeof parsed.sequence !== 'number') {
+    if (
+      !parsed ||
+      typeof parsed.type !== 'string' ||
+      !Number.isInteger(parsed.sequence) ||
+      parsed.sequence < 0
+    ) {
       return null;
     }
     return parsed;
@@ -39,7 +46,8 @@ function buildRunEventsUrl(runId, latestEventSequence) {
     params.set('after_sequence', String(latestEventSequence));
   }
   const suffix = params.toString() ? `?${params.toString()}` : '';
-  return `${API_BASE}/runs/${runId}/events/stream${suffix}`;
+  const base = API_BASE.replace(/\/+$/, '');
+  return `${base}/runs/${encodeURIComponent(runId)}/events/stream${suffix}`;
 }
 
 export {

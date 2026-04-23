@@ -38,6 +38,10 @@ def _ensure_schema_compatibility() -> None:
         _ensure_column("runs", "template_context_origin", "VARCHAR(32) DEFAULT 'explicit'")
     if "memory_summaries" in inspector.get_table_names():
         _ensure_column("memory_summaries", "project_id", "VARCHAR(64)")
+    if "shared_plans" in inspector.get_table_names():
+        _ensure_column("shared_plans", "plan_kind", "VARCHAR(32) DEFAULT 'initial'")
+        _ensure_column("shared_plans", "approval_state", "VARCHAR(32) DEFAULT 'pending'")
+        _ensure_column("shared_plans", "parent_plan_id", "VARCHAR(64)")
 
 
 def _ensure_column(table_name: str, column_name: str, column_sql: str) -> None:

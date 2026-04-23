@@ -11,7 +11,7 @@ from app.agents.base import WorkflowAgent
 from app.agents.runtime_types import WorkflowState
 from app.db import SessionLocal
 from app.models.records import CycleRecord, NodeExecutionRecord, RunRecord
-from app.models.schemas import CycleStatus, EventType, NodeStatus, Role, RunStatus
+from app.models.schemas import AgentTaskResult, CycleStatus, EventType, NodeStatus, Role, RunStatus
 from app.services.workflow_graph_builder import role_dependencies_for_cycle
 
 
@@ -58,6 +58,24 @@ class ExecutionRuntime:
             task = asyncio.create_task(self._run(run_id, resumed=resumed))
             self._tasks[run_id] = task
             task.add_done_callback(lambda _: self._tasks.pop(run_id, None))
+
+    async def recover_inflight_runs(self) -> list[str]:
+        recovered_run_ids: list[str] = []
+        with SessionLocal() as session:
+            running_runs = session.scalars(select(RunRecord).where(RunRecord.status == RunStatus.RUNNING.value)).all()
+            for run in running_runs:
+                existing = self._tasks.get(run.id)
+                if existing is not None and not existing.done():
+                    continue
+                try:
+                    self.retry_manager.prepare_resume(session, run)
+                except ValueError:
+                    continue
+                recovered_run_ids.append(run.id)
+
+        for run_id in recovered_run_ids:
+            await self.start_run(run_id, resumed=True, force_restart=True)
+        return recovered_run_ids
 
     async def _run(self, run_id: str, *, resumed: bool = False) -> None:
         while True:
@@ -107,6 +125,8 @@ class ExecutionRuntime:
             if final_state.get("next_action") == "continue":
                 resumed = False
                 continue
+            if final_state.get("next_action") in {"await_approval", "await_clarification"}:
+                return
             with SessionLocal() as session:
                 run = session.get(RunRecord, run_id)
                 cycle = session.get(CycleRecord, cycle.id)
@@ -144,6 +164,8 @@ class ExecutionRuntime:
             "provider_name": run.provider_name,
             "embedding_provider_name": run.embedding_provider_name,
             "shared_plan_id": None,
+            "active_plan_id": None,
+            "plan_kind": "initial" if cycle.cycle_index == 1 else "remediation",
             "manual_approval": run.manual_approval,
             "template_context": run.template_context or {},
             "template_context_origin": run.template_context_origin,
@@ -153,6 +175,12 @@ class ExecutionRuntime:
             "next_action": "pending",
             "retry_counts": {},
             "blocked_reason": None,
+            "approval_required": False,
+            "approval_state": "pending" if cycle.cycle_index == 1 else "not_required",
+            "clarification_target_role": None,
+            "clarification_accepted_target_role": None,
+            "clarification_history": [],
+            "requirement_baseline": run.requirement,
         }
 
     def _compile_graph(self, graph_kind: str):
@@ -164,18 +192,29 @@ class ExecutionRuntime:
             raise RuntimeError("LangGraph is not installed. Install langgraph to run the workflow runtime.") from exc
 
         initial = graph_kind == "initial"
-        role_order = [Role.PC, Role.CA, Role.FD, Role.BD, Role.DE, Role.QT] if initial else [Role.CA, Role.FD, Role.BD, Role.DE, Role.QT]
+        role_order = [Role.PC, Role.CA, Role.FD, Role.BD, Role.QT, Role.DE] if initial else [Role.CA, Role.FD, Role.BD, Role.QT, Role.DE]
         graph = StateGraph(WorkflowState)
-        role_dependencies = role_dependencies_for_cycle(1 if initial else 2)
         for role in role_order:
             graph.add_node(role.value, self._build_role_node(role, graph_kind))
+        if initial:
+            graph.add_node("clarification_gate", self._build_clarification_gate(graph_kind))
+        graph.add_node("approval_gate", self._build_approval_gate(graph_kind))
+        graph.add_node("implementation_start", self._implementation_start)
         graph.add_node("cycle_transition", self._transition_cycle)
-        graph.add_edge(START, role_order[0].value)
-        for role in role_order:
-            for dependency in role_dependencies[role]:
-                if dependency in role_order:
-                    graph.add_edge(dependency.value, role.value)
-        graph.add_conditional_edges(Role.QT.value, self._route_after_qt, {"complete": END, "transition": "cycle_transition"})
+        if initial:
+            graph.add_edge(START, Role.PC.value)
+            graph.add_edge(Role.PC.value, "clarification_gate")
+            graph.add_conditional_edges("clarification_gate", self._route_after_gate, {"continue": Role.CA.value, "pause": END})
+        else:
+            graph.add_edge(START, Role.CA.value)
+        graph.add_edge(Role.CA.value, "approval_gate")
+        graph.add_conditional_edges("approval_gate", self._route_after_gate, {"continue": "implementation_start", "pause": END})
+        graph.add_edge("implementation_start", Role.FD.value)
+        graph.add_edge("implementation_start", Role.BD.value)
+        graph.add_edge(Role.FD.value, Role.QT.value)
+        graph.add_edge(Role.BD.value, Role.QT.value)
+        graph.add_conditional_edges(Role.QT.value, self._route_after_qt, {"deliver": Role.DE.value, "transition": "cycle_transition", "complete": END})
+        graph.add_edge(Role.DE.value, END)
         graph.add_edge("cycle_transition", END)
         compiled = graph.compile()
         self._graphs[graph_kind] = compiled
@@ -188,6 +227,48 @@ class ExecutionRuntime:
             return await self._execute_role(state, role, graph_kind)
 
         return runner
+
+    def _build_clarification_gate(self, graph_kind: str):
+        async def gate(state: WorkflowState) -> WorkflowState:
+            if state.get("clarification_accepted_target_role") == Role.PC.value:
+                return {
+                    "next_action": "continue",
+                    "clarification_target_role": None,
+                    "blocked_reason": None,
+                    "clarification_accepted_target_role": None,
+                }
+            if not self._pc_requires_clarification((state.get("node_outputs") or {}).get(Role.PC.value, {})):
+                return {
+                    "next_action": "continue",
+                    "clarification_target_role": None,
+                    "blocked_reason": None,
+                    "clarification_accepted_target_role": None,
+                }
+            return await self._pause_for_clarification(state, target_role=Role.PC.value, graph_kind=graph_kind)
+
+        return gate
+
+    def _build_approval_gate(self, graph_kind: str):
+        async def gate(state: WorkflowState) -> WorkflowState:
+            if state.get("approval_state") == "approved":
+                return {
+                    "next_action": "continue",
+                    "blocked_reason": None,
+                }
+            if not self._ca_requires_approval(state):
+                await self._mark_latest_shared_plan_not_required(state)
+                return {
+                    "approval_state": "not_required",
+                    "next_action": "continue",
+                    "blocked_reason": None,
+                }
+            return await self._pause_for_approval(state, graph_kind=graph_kind)
+
+        return gate
+
+    @staticmethod
+    def _implementation_start(state: WorkflowState) -> WorkflowState:
+        return {}
 
     async def _execute_role(self, state: WorkflowState, role: Role, graph_kind: str) -> WorkflowState:
         while True:
@@ -298,20 +379,13 @@ class ExecutionRuntime:
                         rag_service=self.rag_service,
                         tool_logger=tool_logger,
                     )
-                    artifacts = self.artifact_store.save_artifacts(
-                        session,
-                        run_id=run.id,
-                        cycle_id=cycle.id,
-                        cycle_index=cycle.cycle_index,
-                        node_id=node.id,
-                        role=node.role,
-                        artifacts=result.artifact_list,
-                    )
-                    indexed_artifacts = await self.context_document_service.index_artifacts(
-                        session,
-                        project_id=run.project_id,
-                        artifacts=artifacts,
-                        embedding_provider=embedding_model,
+                    artifacts, indexed_artifacts = await self._persist_role_outputs(
+                        session=session,
+                        run=run,
+                        cycle=cycle,
+                        node=node,
+                        result=result,
+                        embedding_model=embedding_model,
                     )
                     if indexed_artifacts:
                         await self.event_bus.publish(
@@ -377,6 +451,44 @@ class ExecutionRuntime:
                         result_payload=result.result_payload,
                         artifacts=artifacts,
                     )
+                    if role is Role.CA:
+                        await self.event_bus.publish(
+                            session,
+                            run_id=run.id,
+                            event_type=EventType.PLAN_DRAFTED,
+                            cycle_id=cycle.id,
+                            node_id=node.id,
+                            payload={
+                                "role": node.role,
+                                "shared_plan_id": shared_plan_id,
+                                "plan_kind": state_update.get("plan_kind", "initial"),
+                            },
+                        )
+                    if role is Role.QT:
+                        await self.event_bus.publish(
+                            session,
+                            run_id=run.id,
+                            event_type=EventType.QUALITY_GATE_FAILED if state_update.get("next_action") == "transition" else EventType.QUALITY_GATE_PASSED,
+                            cycle_id=cycle.id,
+                            node_id=node.id,
+                            payload={
+                                "role": node.role,
+                                "status": state_update.get("node_outputs", {}).get(Role.QT.value, {}).get("status", result.result_payload.get("status")),
+                                "approval_required": state_update.get("approval_required", False),
+                            },
+                        )
+                    if role is Role.DE:
+                        await self.event_bus.publish(
+                            session,
+                            run_id=run.id,
+                            event_type=EventType.DELIVERY_COMPLETED,
+                            cycle_id=cycle.id,
+                            node_id=node.id,
+                            payload={
+                                "role": node.role,
+                                "artifact_count": len(artifacts),
+                            },
+                        )
                     checkpoint_state = self._merge_state(state, state_update)
                     await self._save_checkpoint(session, checkpoint_state, graph_kind)
                     return state_update
@@ -408,6 +520,119 @@ class ExecutionRuntime:
                         payload={"reason": str(exc), "blocked_node": node.role},
                     )
                     raise
+
+    async def _persist_role_outputs(
+        self,
+        *,
+        session,
+        run,
+        cycle,
+        node,
+        result: AgentTaskResult,
+        embedding_model,
+    ) -> tuple[list[Any], int]:
+        artifacts = self.artifact_store.save_role_outputs(
+            session,
+            run_id=run.id,
+            cycle_id=cycle.id,
+            cycle_index=cycle.cycle_index,
+            node_id=node.id,
+            role=node.role,
+            artifacts=result.artifact_list,
+            edit_operations=result.edit_operations,
+        )
+        indexed_artifacts = await self.context_document_service.index_artifacts(
+            session,
+            project_id=run.project_id,
+            artifacts=artifacts,
+            embedding_provider=embedding_model,
+        )
+        return artifacts, indexed_artifacts
+
+    @staticmethod
+    def _route_after_gate(state: WorkflowState) -> str:
+        return "pause" if state.get("next_action") in {"await_approval", "await_clarification"} else "continue"
+
+    async def _pause_for_approval(self, state: WorkflowState, *, graph_kind: str) -> WorkflowState:
+        run_id = state.get("run_id")
+        cycle_id = state.get("cycle_id")
+        if run_id is None or cycle_id is None:
+            raise ValueError("Workflow state is missing run_id or cycle_id.")
+        with SessionLocal() as session:
+            run = session.get(RunRecord, run_id)
+            cycle = session.get(CycleRecord, cycle_id)
+            if run is None or cycle is None:
+                raise ValueError("Approval gate could not load run state.")
+            run.status = RunStatus.WAITING_APPROVAL.value
+            cycle.status = CycleStatus.WAITING_APPROVAL.value
+            run.updated_at = datetime.now(timezone.utc)
+            state_update: WorkflowState = {
+                "approval_state": "pending",
+                "next_action": "await_approval",
+                "blocked_reason": "waiting_for_plan_approval",
+            }
+            checkpoint_state = self._merge_state(state, state_update)
+            await self._save_checkpoint(session, checkpoint_state, graph_kind)
+            await self.event_bus.publish(
+                session,
+                run_id=run.id,
+                event_type=EventType.APPROVAL_REQUIRED,
+                cycle_id=cycle.id,
+                payload={
+                    "cycle_index": cycle.cycle_index,
+                    "shared_plan_id": checkpoint_state.get("shared_plan_id"),
+                    "reason": "initial_plan" if cycle.cycle_index == 1 else "severe_remediation",
+                },
+            )
+            session.commit()
+            return state_update
+
+    async def _pause_for_clarification(self, state: WorkflowState, *, target_role: str, graph_kind: str) -> WorkflowState:
+        run_id = state.get("run_id")
+        cycle_id = state.get("cycle_id")
+        if run_id is None or cycle_id is None:
+            raise ValueError("Workflow state is missing run_id or cycle_id.")
+        with SessionLocal() as session:
+            run = session.get(RunRecord, run_id)
+            cycle = session.get(CycleRecord, cycle_id)
+            if run is None or cycle is None:
+                raise ValueError("Clarification gate could not load run state.")
+            run.status = RunStatus.WAITING_CLARIFICATION.value
+            cycle.status = CycleStatus.WAITING_CLARIFICATION.value
+            run.updated_at = datetime.now(timezone.utc)
+            state_update: WorkflowState = {
+                "next_action": "await_clarification",
+                "clarification_target_role": target_role,
+                "blocked_reason": "waiting_for_requirement_clarification",
+            }
+            checkpoint_state = self._merge_state(state, state_update)
+            await self._save_checkpoint(session, checkpoint_state, graph_kind)
+            await self.event_bus.publish(
+                session,
+                run_id=run.id,
+                event_type=EventType.CLARIFICATION_REQUIRED,
+                cycle_id=cycle.id,
+                payload={
+                    "cycle_index": cycle.cycle_index,
+                    "target_role": target_role,
+                    "reason": "pc_flagged_ambiguity",
+                },
+            )
+            session.commit()
+            return state_update
+
+    async def _mark_latest_shared_plan_not_required(self, state: WorkflowState) -> None:
+        run_id = state.get("run_id")
+        shared_plan_id = state.get("shared_plan_id")
+        if run_id is None:
+            return
+        with SessionLocal() as session:
+            shared_plan = self.context_document_service.get_current_shared_plan(session, run_id)
+            if shared_plan is None or (shared_plan_id and shared_plan.id != shared_plan_id):
+                return
+            if shared_plan.approval_state != "not_required":
+                shared_plan.approval_state = "not_required"
+                session.commit()
 
     async def _transition_cycle(self, state: WorkflowState) -> WorkflowState:
         run_id = state.get("run_id")
@@ -457,6 +682,7 @@ class ExecutionRuntime:
                     "remediation_requirement": remediation,
                 },
             )
+            approval_required = self._qt_requires_approval(qt_payload)
             state_update: WorkflowState = {
                 "cycle_id": next_cycle.id,
                 "cycle_index": next_cycle.cycle_index,
@@ -467,19 +693,69 @@ class ExecutionRuntime:
                 "artifact_refs": {},
                 "retry_counts": {},
                 "shared_plan_id": None,
+                "active_plan_id": None,
+                "plan_kind": "remediation",
+                "approval_required": approval_required,
+                "approval_state": "pending" if approval_required else "not_required",
+                "clarification_target_role": None,
+                "clarification_accepted_target_role": None,
             }
             checkpoint_state = self._merge_state(state, state_update)
             await self._save_checkpoint(session, checkpoint_state, "remediation")
             return state_update
 
     def _route_after_qt(self, state: WorkflowState) -> str:
-        return "transition" if state.get("next_action") == "continue" else "complete"
+        next_action = state.get("next_action")
+        if next_action == "transition":
+            return "transition"
+        if next_action == "deliver":
+            return "deliver"
+        return "complete"
 
     @staticmethod
     def _qt_requires_remediation(result_payload: dict[str, Any]) -> bool:
         defects = WorkflowAgent._normalize_quality_defect_list(result_payload.get("defect_list", []))
         status = WorkflowAgent._normalize_quality_status(result_payload.get("status", "FAIL"), defects)
         return status == "FAIL"
+
+    @staticmethod
+    def _qt_requires_approval(result_payload: dict[str, Any]) -> bool:
+        defects = WorkflowAgent._normalize_quality_defect_list(result_payload.get("defect_list", []))
+        if any(defect.get("severity") == "high" for defect in defects):
+            return True
+        approval_recommended = result_payload.get("approval_recommended", False)
+        if isinstance(approval_recommended, str):
+            return approval_recommended.strip().lower() in {"true", "1", "yes", "y"}
+        return bool(approval_recommended)
+
+    @staticmethod
+    def _normalize_score(value: Any) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if score > 1.0:
+            score = score / 100.0
+        return max(0.0, min(1.0, score))
+
+    def _pc_requires_clarification(self, result_payload: dict[str, Any]) -> bool:
+        intent = result_payload.get("intent", {}) if isinstance(result_payload, dict) else {}
+        fidelity = result_payload.get("requirement_fidelity", {}) if isinstance(result_payload, dict) else {}
+        if bool(intent.get("needs_clarification")):
+            return True
+        if WorkflowAgent._normalize_string_list(intent.get("clarifying_questions", [])):
+            return True
+        if bool(fidelity.get("clarification_needed")):
+            return True
+        semantic_score = self._normalize_score(fidelity.get("semantic_coverage_score", 0.0))
+        constraint_score = self._normalize_score(fidelity.get("constraint_retention_score", 0.0))
+        return semantic_score < 0.85 or constraint_score < 0.90
+
+    @staticmethod
+    def _ca_requires_approval(state: WorkflowState) -> bool:
+        if state.get("cycle_index") == 1:
+            return True
+        return bool(state.get("approval_required"))
 
     def _next_state(
         self,
@@ -500,8 +776,30 @@ class ExecutionRuntime:
         }
         if shared_plan_id:
             state_update["shared_plan_id"] = shared_plan_id
-
-        if role is not Role.QT:
+            state_update["active_plan_id"] = shared_plan_id
+            state_update["plan_kind"] = "initial" if cycle.cycle_index == 1 else "remediation"
+        if role is Role.CA:
+            state_update["approval_state"] = "pending"
+            return state_update
+        if role is Role.PC:
+            return state_update
+        if role in {Role.FD, Role.BD}:
+            return state_update
+        if role is Role.DE:
+            run_id = state.get("run_id")
+            if run_id is None:
+                return state_update
+            with SessionLocal() as session:
+                run = session.get(RunRecord, run_id)
+                current_cycle = session.get(CycleRecord, cycle.id)
+                if run is None or current_cycle is None:
+                    return state_update
+                current_cycle.status = CycleStatus.COMPLETED.value
+                current_cycle.updated_at = datetime.now(timezone.utc)
+                run.status = RunStatus.COMPLETED.value
+                run.updated_at = datetime.now(timezone.utc)
+                session.commit()
+            state_update["next_action"] = "complete"
             return state_update
 
         defects = WorkflowAgent._normalize_quality_defect_list(result_payload.get("defect_list", []))
@@ -511,6 +809,7 @@ class ExecutionRuntime:
             "status": status,
             "defect_list": defects,
         }
+        state_update["node_outputs"] = {role.value: result_payload}
         state_update["next_action"] = "complete"
         run_id = state.get("run_id")
         if run_id is None:
@@ -528,13 +827,14 @@ class ExecutionRuntime:
                     run.status = RunStatus.FAILED_MAX_CYCLES.value
                     run.updated_at = datetime.now(timezone.utc)
                 else:
-                    state_update["next_action"] = "continue"
+                    state_update["next_action"] = "transition"
                 session.commit()
             else:
-                current_cycle.status = CycleStatus.COMPLETED.value
-                run.status = RunStatus.COMPLETED.value
+                current_cycle.status = CycleStatus.RUNNING.value
+                run.status = RunStatus.RUNNING.value
                 run.updated_at = datetime.now(timezone.utc)
                 session.commit()
+                state_update["next_action"] = "deliver"
         return state_update
 
     def _sync_state_from_node(self, state: WorkflowState, node: NodeExecutionRecord, cycle: CycleRecord) -> WorkflowState:
@@ -548,8 +848,17 @@ class ExecutionRuntime:
                 shared_plan = self.context_document_service.get_current_shared_plan(session, state.get("run_id"))
                 if shared_plan is not None:
                     state_update["shared_plan_id"] = shared_plan.id
+                    state_update["active_plan_id"] = shared_plan.id
+                    state_update["plan_kind"] = shared_plan.plan_kind
+                    state_update["approval_state"] = shared_plan.approval_state
         if node.role == Role.QT.value:
-            state_update["next_action"] = "continue" if self._qt_requires_remediation(node.result_payload or {}) else "complete"
+            if self._qt_requires_remediation(node.result_payload or {}):
+                state_update["next_action"] = "transition"
+                state_update["approval_required"] = self._qt_requires_approval(node.result_payload or {})
+            else:
+                state_update["next_action"] = "deliver"
+        if node.role == Role.DE.value:
+            state_update["next_action"] = "complete"
         return state_update
 
     def _merge_state(self, base_state: WorkflowState, state_update: WorkflowState) -> WorkflowState:
@@ -608,17 +917,25 @@ class ExecutionRuntime:
         embedding_model,
     ) -> str | None:
         plan_payload: dict[str, Any] | None = None
+        plan_kind = "initial" if cycle.cycle_index == 1 else "remediation"
+        approval_state = "pending" if node.role == Role.CA.value else "not_required"
+        parent_plan_id: str | None = None
         if node.role == Role.PC.value:
             plan_payload = {
+                "intent": result_payload.get("intent", {}),
                 "requirement_brief": result_payload.get("requirement_brief", ""),
                 "acceptance_criteria": result_payload.get("acceptance_criteria", {}),
                 "work_breakdown": result_payload.get("work_breakdown", []),
+                "requirement_fidelity": result_payload.get("requirement_fidelity", {}),
                 "template_context": run.template_context or {},
             }
         elif node.role == Role.CA.value and result_payload.get("shared_plan"):
+            current_plan = self.context_document_service.get_current_shared_plan(session, run.id)
+            parent_plan_id = current_plan.id if current_plan is not None else None
             plan_payload = dict(result_payload.get("shared_plan") or {})
             plan_payload.setdefault("interfaces", result_payload.get("interfaces", []))
             plan_payload.setdefault("architecture_decisions", result_payload.get("architecture_decisions", []))
+            plan_payload.setdefault("remediation_plan", result_payload.get("remediation_plan", {}))
             plan_payload.setdefault("template_context", run.template_context or {})
         if not plan_payload:
             return None
@@ -629,6 +946,9 @@ class ExecutionRuntime:
             produced_by_role=node.role,
             plan_payload=plan_payload,
             summary=summary,
+            plan_kind=plan_kind,
+            approval_state=approval_state,
+            parent_plan_id=parent_plan_id,
         )
         indexed = await self.context_document_service.index_shared_plan(
             session,

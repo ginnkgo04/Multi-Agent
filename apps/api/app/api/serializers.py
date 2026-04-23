@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agents.base import WorkflowAgent
 from app.config import get_settings
-from app.models.records import CycleRecord, MemorySummaryRecord, NodeExecutionRecord, ProjectRecord, RunRecord, SharedPlanRecord
+from app.models.records import CycleRecord, EventRecord, MemorySummaryRecord, NodeExecutionRecord, ProjectRecord, RunRecord, SharedPlanRecord
 from app.models.schemas import (
     ArtifactManifest,
     CycleStatus,
@@ -54,7 +54,8 @@ def to_cycle_summary(session: Session, cycle: CycleRecord) -> CycleSummary:
     nodes = session.scalars(
         select(NodeExecutionRecord).where(NodeExecutionRecord.cycle_id == cycle.id).order_by(NodeExecutionRecord.batch_index)
     ).all()
-    quality_report = _normalize_quality_report(cycle.quality_report) if cycle.quality_report else None
+    qt_completed = any(node.role == Role.QT.value and node.status == NodeStatus.COMPLETED.value for node in nodes)
+    quality_report = _normalize_quality_report(cycle.quality_report) if cycle.quality_report and qt_completed else None
     return CycleSummary(
         id=cycle.id,
         run_id=cycle.run_id,
@@ -84,8 +85,10 @@ def to_cycle_summary(session: Session, cycle: CycleRecord) -> CycleSummary:
 
 def to_run_detail(session: Session, run: RunRecord, artifacts: list[ArtifactManifest]) -> RunDetail:
     cycles = session.scalars(select(CycleRecord).where(CycleRecord.run_id == run.id).order_by(CycleRecord.cycle_index)).all()
+    latest_event_sequence = session.scalar(select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run.id)) or 0
     return RunDetail(
         **to_run_read(run).model_dump(),
+        latest_event_sequence=latest_event_sequence,
         cycles=[to_cycle_summary(session, cycle) for cycle in cycles],
         latest_artifacts=artifacts[:12],
     )
@@ -97,6 +100,7 @@ def to_shared_plan_read(run_id: str, records: list[SharedPlanRecord]) -> SharedP
         run_id=run_id,
         latest_plan_id=latest.id if latest else None,
         latest_plan=dict(latest.plan_payload or {}) if latest else {},
+        latest_approval_state=latest.approval_state if latest else None,
         versions=[
             SharedPlanVersionRead(
                 id=record.id,
@@ -105,6 +109,9 @@ def to_shared_plan_read(run_id: str, records: list[SharedPlanRecord]) -> SharedP
                 produced_by_role=record.produced_by_role,
                 summary=record.summary,
                 is_current=record.is_current,
+                plan_kind=record.plan_kind,
+                approval_state=record.approval_state,
+                parent_plan_id=record.parent_plan_id,
                 created_at=record.created_at,
             )
             for record in records
@@ -156,6 +163,7 @@ def _normalize_quality_report(raw_report: dict | None) -> QualityReport | None:
         root_cause_guess=_stringify_value(raw_report.get("root_cause_guess", "")),
         retest_scope=_normalize_string_list(raw_report.get("retest_scope", [])),
         remediation_requirement=_stringify_value(raw_report.get("remediation_requirement", "")),
+        approval_recommended=bool(raw_report.get("approval_recommended", False)),
     )
 
 

@@ -54,6 +54,7 @@ class RetryRecoveryManager:
         for node in nodes:
             if node.status in {NodeStatus.BLOCKED.value, NodeStatus.FAILED.value, NodeStatus.RUNNING.value}:
                 node.status = NodeStatus.PENDING.value
+                node.retry_count = 0
                 node.error_message = None
                 node.finished_at = None
         cycle.status = CycleStatus.RUNNING.value

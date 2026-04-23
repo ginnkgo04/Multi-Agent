@@ -40,9 +40,9 @@ export default function HomePage() {
             <div className="kicker">White-Box AI Delivery</div>
             <h1>Build, observe, recover, and loop your software agents in public.</h1>
             <p>
-              This dashboard turns a software request into an explicit PC / CA / FD / BD / DE / QT workflow, then streams every event,
-              artifact, retry, and remediation cycle. Each run now writes concrete frontend and backend task files into its own
-              workspace so you can inspect the generated implementation, not just the orchestration trace.
+              This dashboard turns a software request into an explicit PC / CA / approval / FD / BD / QT / DE workflow, then streams
+              every event, artifact, retry, and remediation cycle. Each run writes concrete frontend and backend task files into its
+              own workspace so you can inspect the generated implementation, not just the orchestration trace.
             </p>
             <div className="button-row">
               <Link className="button" href="#launchpad">Jump to Launchpad</Link>
@@ -54,7 +54,7 @@ export default function HomePage() {
           <div className="panel panel-strong">
             <div className="panel-title">Platform Highlights</div>
             <div className="project-list">
-              <div className="project-item">6-role workflow with explicit graph batches and QT remediation loops</div>
+              <div className="project-item">6-role workflow with approval gates, clarification loops, and QT-driven remediation</div>
               <div className="project-item">Persistent runs, cycles, nodes, artifacts, events, and memory traces</div>
               <div className="project-item">Live LLM and embedding calls powered by the API keys configured in `apps/api/.env`</div>
             </div>

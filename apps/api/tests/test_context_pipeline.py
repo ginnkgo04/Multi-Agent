@@ -23,6 +23,11 @@ class FakeEmbeddings:
         return [1.0]
 
 
+class FailingContextDocuments(ContextDocumentService):
+    async def retrieve(self, *args, **kwargs):
+        raise TimeoutError()
+
+
 def make_session() -> Session:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(bind=engine)
@@ -68,6 +73,37 @@ def test_requirement_intake_inherits_project_template_profile_when_request_is_em
 
     assert run.template_context == {"design": "consistent", "stack": "next-fastapi"}
     assert run.template_context_origin == "project_profile"
+
+
+def test_requirement_intake_readme_documents_run_level_workspace(tmp_path: Path) -> None:
+    session = make_session()
+    memory_service = MemoryService()
+    intake = RequirementIntakeService(memory_service)
+    intake.settings.task_root_dir = tmp_path
+
+    project = ProjectRecord(name="Demo", template="next-fastapi-template")
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+
+    run = intake.create_run(
+        session,
+        payload=RunRequest(
+            project_id=project.id,
+            requirement="Ship a landing page",
+            template_context={"stack": "next-fastapi"},
+            manual_approval=False,
+            max_cycles=1,
+        ),
+        provider_name="chat",
+        embedding_provider_name="embed",
+    )
+
+    readme = (tmp_path / run.id / "README.md").read_text(encoding="utf-8")
+
+    assert "- `workspace/frontend`: live frontend code for the entire run" in readme
+    assert "- `delivery/`: final delivery bundle for the run" in readme
+    assert "cycles/cycle-xx/workspace/frontend" not in readme
 
 
 def test_context_assembler_uses_current_shared_plan_and_orders_context_sources(tmp_path: Path) -> None:
@@ -215,3 +251,119 @@ def test_context_budgeter_trims_low_priority_context_first() -> None:
     assert budgeted[3]["included"] is False
     assert metadata["final_chars"] <= metadata["char_budget"]
     assert len(budgeted[5]["excerpt"]) < 60
+
+
+def test_context_assembler_includes_run_workspace_manifest_and_snapshots(tmp_path: Path) -> None:
+    session = make_session()
+    artifact_store = ArtifactStore()
+    artifact_store.settings.task_root_dir = tmp_path
+
+    project = ProjectRecord(name="Demo", template="next-fastapi-template")
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    run = RunRecord(
+        project_id=project.id,
+        requirement="Build a dashboard",
+        status="RUNNING",
+        provider_name="chat",
+        embedding_provider_name="embed",
+        template_context={"stack": "next-fastapi"},
+        template_context_origin="explicit",
+    )
+    session.add(run)
+    session.flush()
+    cycle = CycleRecord(run_id=run.id, cycle_index=2, status="RUNNING", remediation_requirement="Update the hero copy")
+    session.add(cycle)
+    session.flush()
+    fd_node = NodeExecutionRecord(
+        run_id=run.id,
+        cycle_id=cycle.id,
+        role=Role.FD.value,
+        batch_index=1,
+        status="PENDING",
+        task_spec={"focus": "frontend"},
+    )
+    session.add(fd_node)
+    session.commit()
+
+    target = tmp_path / run.id / "workspace" / "frontend" / "app" / "page.tsx"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export default function Page() { return <main>Polar Bear</main>; }\n", encoding="utf-8")
+
+    assembler = ContextAssembler(
+        artifact_store,
+        MemoryService(),
+        ContextDocumentService(),
+        ContextBudgeter(6000),
+    )
+    provider = ProviderConfig(id="embed", name="embed", kind=ProviderKind.EMBEDDING, provider="openai-compatible", model="fake")
+
+    context = asyncio.run(
+        assembler.build_context(
+            session,
+            run=run,
+            cycle=cycle,
+            node=fd_node,
+            chat_config=provider,
+            embedding_provider=FakeEmbeddings(),
+        )
+    )
+
+    assert context.workspace_manifest == ["workspace/frontend/app/page.tsx"]
+    assert context.workspace_snapshots[0].path == "workspace/frontend/app/page.tsx"
+    assert "Polar Bear" in context.workspace_snapshots[0].content
+
+
+def test_context_assembler_degrades_when_retrieval_fails() -> None:
+    session = make_session()
+    project = ProjectRecord(name="Demo", template="next-fastapi-template")
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    run = RunRecord(
+        project_id=project.id,
+        requirement="Build a dashboard",
+        status="RUNNING",
+        provider_name="chat",
+        embedding_provider_name="embed",
+        template_context={},
+        template_context_origin="empty",
+    )
+    session.add(run)
+    session.flush()
+    cycle = CycleRecord(run_id=run.id, cycle_index=1, status="RUNNING")
+    session.add(cycle)
+    session.flush()
+    bd_node = NodeExecutionRecord(
+        run_id=run.id,
+        cycle_id=cycle.id,
+        role=Role.BD.value,
+        batch_index=1,
+        status="PENDING",
+        task_spec={"focus": "backend"},
+    )
+    session.add(bd_node)
+    session.commit()
+
+    assembler = ContextAssembler(
+        ArtifactStore(),
+        MemoryService(),
+        FailingContextDocuments(),
+        ContextBudgeter(6000),
+    )
+    provider = ProviderConfig(id="embed", name="embed", kind=ProviderKind.EMBEDDING, provider="openai-compatible", model="fake")
+
+    context = asyncio.run(
+        assembler.build_context(
+            session,
+            run=run,
+            cycle=cycle,
+            node=bd_node,
+            chat_config=provider,
+            embedding_provider=FakeEmbeddings(),
+        )
+    )
+
+    assert context.retrieved_context == []
+    assert "TimeoutError" in context.context_metadata["retrieval_error"]
